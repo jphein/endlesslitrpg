@@ -205,3 +205,70 @@ fn stamping_the_prompt_hash_without_a_story_is_an_error() {
         .unwrap_err();
     assert!(err.to_string().contains("no story row"), "{err}");
 }
+
+/// The reason `litrpg story --title` is a setter and not a read-modify-write through
+/// `upsert_story`: the engine stamps `prompt_hash` at chapter boundaries, so a CLI that
+/// read the row, changed the title and wrote every field back would revert whatever the
+/// engine wrote in between. Single statements have no such window.
+#[test]
+fn renaming_touches_only_the_named_field() {
+    let store = Store::open_in_memory().unwrap();
+    store.upsert_story(&new_story("Endless", "Kaelen")).unwrap();
+    store.set_arc_outline("## Arc 1").unwrap();
+    store.set_consumed_through(4).unwrap();
+
+    store.set_title("The Ashen Ledger").unwrap();
+    store.set_protagonist("Kaelen Vord").unwrap();
+
+    let s = store.story().unwrap().unwrap();
+    assert_eq!(s.title, "The Ashen Ledger");
+    assert_eq!(s.protagonist, "Kaelen Vord");
+    assert_eq!(s.arc_outline_md, "## Arc 1");
+    assert_eq!(s.consumed_through, 4);
+    assert_eq!(s.prompt_hash, "fnv1a64:cbf29ce484222325");
+}
+
+/// `protagonist` is compared by string equality in `known_subjects`, so padding is not
+/// cosmetic — it would stop the protagonist matching their own ledger subject.
+#[test]
+fn renaming_trims_because_the_protagonist_is_an_identity_key() {
+    let store = Store::open_in_memory().unwrap();
+    store.upsert_story(&new_story("Endless", "Kaelen")).unwrap();
+
+    store.set_protagonist("  Kaelen Vord  ").unwrap();
+    store.set_title("  The Ashen Ledger\n").unwrap();
+
+    let s = store.story().unwrap().unwrap();
+    assert_eq!(s.protagonist, "Kaelen Vord");
+    assert_eq!(s.title, "The Ashen Ledger");
+}
+
+/// Empty is never a correction, and an empty protagonist would silently change
+/// validation: `known_subjects` filters `protagonist <> ''`, so the protagonist's own
+/// deltas would start being rejected as unknown subjects.
+#[test]
+fn renaming_to_nothing_is_refused() {
+    let store = Store::open_in_memory().unwrap();
+    store.upsert_story(&new_story("Endless", "Kaelen")).unwrap();
+
+    for blank in ["", "   ", "\t\n"] {
+        let err = store.set_protagonist(blank).unwrap_err();
+        assert!(
+            err.to_string().contains("protagonist cannot be empty"),
+            "{err}"
+        );
+        let err = store.set_title(blank).unwrap_err();
+        assert!(err.to_string().contains("title cannot be empty"), "{err}");
+    }
+
+    let s = store.story().unwrap().unwrap();
+    assert_eq!(s.protagonist, "Kaelen");
+    assert_eq!(s.title, "Endless");
+}
+
+#[test]
+fn renaming_without_a_story_is_an_error() {
+    let store = Store::open_in_memory().unwrap();
+    assert!(store.set_title("The Ashen Ledger").is_err());
+    assert!(store.set_protagonist("Kaelen Vord").is_err());
+}

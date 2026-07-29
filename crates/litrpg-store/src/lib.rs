@@ -39,6 +39,12 @@ pub enum StoreError {
     InvalidManifest { number: u32, why: &'static str },
     #[error("no story row exists; run `litrpg init` first")]
     NoStoryRow,
+    /// A single-field setter was handed an empty string. Rejected rather than written
+    /// because these setters exist to *correct* a field, and "" is never a correction —
+    /// while an empty `protagonist` silently changes ledger validation (it drops out of
+    /// `known_subjects`, so every delta about the protagonist becomes an unknown subject).
+    #[error("{field} cannot be empty")]
+    EmptyField { field: &'static str },
     #[error("{0} is not in the cast")]
     UnknownSpeaker(String),
     #[error("chapter {chapter} segment {idx} has an unrecognised kind {value:?}")]

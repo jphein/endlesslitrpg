@@ -178,6 +178,59 @@ impl Store {
         Ok(())
     }
 
+    /// The shared body of the single-field story setters.
+    ///
+    /// `sql` is a literal supplied by each caller rather than a formatted column name —
+    /// the guard and the "zero rows means no story" rule get one owner without this
+    /// becoming a place that builds SQL from strings.
+    ///
+    /// Values are stored trimmed. That is cosmetic for `title` and load-bearing for
+    /// `protagonist`: it is an identity key compared by string equality in
+    /// `known_subjects`, so a padded `"Kaelen Vord "` would never match the ledger
+    /// subject `"Kaelen Vord"` and the protagonist's own deltas would start being
+    /// rejected as unknown.
+    fn set_story_field(&self, field: &'static str, sql: &'static str, value: &str) -> Result<()> {
+        let value = value.trim();
+        if value.is_empty() {
+            return Err(StoreError::EmptyField { field });
+        }
+        let n = self.conn.execute(sql, params![value, now_ms()])?;
+        if n == 0 {
+            return Err(StoreError::NoStoryRow);
+        }
+        Ok(())
+    }
+
+    /// Rename the story. Cosmetic — it is the RSS channel title and the CLI header.
+    pub fn set_title(&self, title: &str) -> Result<()> {
+        self.set_story_field(
+            "title",
+            "UPDATE story SET title = ?1, updated_at = ?2",
+            title,
+        )
+    }
+
+    /// Rename the protagonist.
+    ///
+    /// # This is an identity key, not a label
+    ///
+    /// `known_subjects` unions the protagonist with ledger subjects and cast names, and
+    /// the fold groups ledger rows by `subject` string. Renaming therefore **does not
+    /// carry the existing ledger with it**: rows written against the old name keep folding
+    /// into a subject that is no longer anybody, and the renamed protagonist starts from
+    /// an empty sheet. Nothing here can fix that, because merging two subjects is a
+    /// decision (issue #11) rather than a rewrite — so a caller offering this to a human
+    /// should say so when the ledger is non-empty.
+    ///
+    /// Safe before chapter 1. Not a silent operation after it.
+    pub fn set_protagonist(&self, protagonist: &str) -> Result<()> {
+        self.set_story_field(
+            "protagonist",
+            "UPDATE story SET protagonist = ?1, updated_at = ?2",
+            protagonist,
+        )
+    }
+
     /// Replace the arc outline. Engine-owned; nothing else should call this.
     ///
     /// Errors rather than no-ops when there is no story row, because a silent

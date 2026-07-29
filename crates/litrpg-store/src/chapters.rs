@@ -185,6 +185,48 @@ impl Store {
         Ok(())
     }
 
+    /// Clear `has_audio` so the engine's resume path picks the chapter up and re-renders
+    /// it. Returns whether the flag actually changed; `false` means it was already clear
+    /// and the chapter was already queued.
+    ///
+    /// # Only the flag
+    ///
+    /// `duration_ms`, `manifest_json` and the segment rows are left alone, which leaves a
+    /// deliberate transient inconsistency: `has_audio = 0` beside a duration and a full
+    /// manifest. That is the honest state, because the rendered file is still on disk and
+    /// still playable — and if the re-render never happens (engine down, backend missing)
+    /// wiping the manifest would have destroyed the only record of audio that still works.
+    /// Clearing the flag is undone by the next [`Store::attach_audio`]; deleting segments
+    /// is undone by nothing. Same reasoning as `AudioFileMissing` vs `ChapterHasNoAudio`.
+    ///
+    /// Errors on an absent chapter rather than reporting `false`. Collapsing "already
+    /// queued" and "no such chapter" would make `litrpg render 99` on a five-chapter story
+    /// print a reassuring no-op — the destructive asymmetry that made `op_from_str` and
+    /// `SpeakerKind::from_canonical` strict.
+    pub fn clear_audio(&self, number: u32) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE chapters SET has_audio = 0 WHERE number = ?1 AND has_audio = 1",
+            params![number],
+        )?;
+        if changed > 0 {
+            return Ok(true);
+        }
+        // Nothing changed: either already clear or not there. Only now is the extra
+        // query worth it, so the common path stays one statement.
+        let exists: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM chapters WHERE number = ?1",
+                params![number],
+                |r| r.get(0),
+            )
+            .ok();
+        if exists.is_none() {
+            return Err(StoreError::ChapterNotFound(number));
+        }
+        Ok(false)
+    }
+
     pub fn segments(&self, number: u32) -> Result<Vec<Segment>> {
         let mut stmt = self.conn.prepare(
             "SELECT s.idx, s.speaker, s.kind, s.text, s.voice_ref, s.start_ms, s.end_ms

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use litrpg_cli::{cast, note, prompt, render, rewind, state, status};
+use litrpg_cli::{cast, init, note, prompt, render, rewind, state, status};
 use litrpg_config::Config;
 use litrpg_store::Store;
 
@@ -31,6 +31,20 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Create config, directories, database and story row. Idempotent.
+    Init {
+        /// Rewrite prompt.md and refresh the story row. A config.toml that loads is
+        /// kept — replacing it would repoint this install at the default paths
+        #[arg(long)]
+        force: bool,
+        /// Story title (only applied when the story row is created, or with --force)
+        #[arg(long, value_name = "TITLE")]
+        title: Option<String>,
+        /// Protagonist name — resolves /api/character with no subject
+        #[arg(long, value_name = "NAME")]
+        protagonist: Option<String>,
+    },
+
     /// Edit the story prompt in $EDITOR; takes effect at the next chapter boundary
     Prompt,
 
@@ -113,11 +127,43 @@ fn print_json<T: serde::Serialize>(value: &T) -> Result<()> {
     Ok(())
 }
 
+/// `init` is handled before the normal config load because it *creates* the config
+/// it needs. Requiring a loadable config first would mean a malformed file blocks
+/// the one command able to repair it (`init --force`).
+fn run_init(cli: &Cli, opts: &init::InitOptions) -> Result<()> {
+    let path = cli.config.clone().or_else(litrpg_config::config_path);
+    let (_config, report) = init::init(path.as_deref(), opts)?;
+    if cli.json {
+        print_json(&report)?;
+    } else {
+        print!("{}", init::render_text(&report));
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    if let Command::Init {
+        force,
+        title,
+        protagonist,
+    } = &cli.command
+    {
+        return run_init(
+            &cli,
+            &init::InitOptions {
+                force: *force,
+                title: title.clone(),
+                protagonist: protagonist.clone(),
+            },
+        );
+    }
+
     let config = load_config(cli.config.as_ref())?;
 
     match &cli.command {
+        Command::Init { .. } => unreachable!("handled before the config load"),
         Command::Prompt => {
             let path = config.prompt_path();
             let editor = std::env::var("EDITOR").ok();
@@ -127,6 +173,7 @@ fn main() -> Result<()> {
                 print_json(&serde_json::json!({
                     "path": outcome.path,
                     "created": outcome.created,
+                    "is_placeholder": outcome.is_placeholder,
                     "changed": outcome.changed,
                     "hash": outcome.hash,
                     "previous_hash": outcome.previous_hash,

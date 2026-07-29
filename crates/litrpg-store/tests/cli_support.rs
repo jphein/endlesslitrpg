@@ -32,7 +32,9 @@ fn notes_round_trip_and_drain() {
 
     let id = store.insert_note("introduce a rival", "cli").unwrap();
     assert!(id > 0);
-    store.insert_note("slow down, more worldbuilding", "watch").unwrap();
+    store
+        .insert_note("slow down, more worldbuilding", "watch")
+        .unwrap();
 
     let pending = store.pending_notes().unwrap();
     assert_eq!(pending.len(), 2);
@@ -45,7 +47,9 @@ fn notes_round_trip_and_drain() {
     assert!(store.pending_notes().unwrap().is_empty());
 
     // A note queued after the drain is pending again.
-    store.insert_note("bring back the thief", "candela").unwrap();
+    store
+        .insert_note("bring back the thief", "candela")
+        .unwrap();
     assert_eq!(store.pending_notes().unwrap().len(), 1);
 }
 
@@ -64,11 +68,22 @@ fn cast_lists_in_first_appearance_order() {
 #[test]
 fn applied_and_rejected_counts_are_separate() {
     let store = store_with_two_characters();
-    store.append_delta(1, &delta("Kaelen", "hp", Op::Set, 100)).unwrap().unwrap();
-    store.append_delta(1, &delta("Kaelen", "level", Op::Set, 3)).unwrap().unwrap();
+    store
+        .append_delta(1, &delta("Kaelen", "hp", Op::Set, 100))
+        .unwrap()
+        .unwrap();
+    store
+        .append_delta(1, &delta("Kaelen", "level", Op::Set, 3))
+        .unwrap()
+        .unwrap();
 
     // Rejected: level may not decrease.
-    assert!(store.append_delta(2, &delta("Kaelen", "level", Op::Set, 1)).unwrap().is_err());
+    assert!(
+        store
+            .append_delta(2, &delta("Kaelen", "level", Op::Set, 1))
+            .unwrap()
+            .is_err()
+    );
 
     assert_eq!(store.applied_count().unwrap(), 2);
     assert_eq!(store.rejected_count().unwrap(), 1);
@@ -80,10 +95,21 @@ fn applied_and_rejected_counts_are_separate() {
 fn rejection_reasons_group_by_code_not_by_payload() {
     let store = store_with_two_characters();
     for (who, max) in [("Kaelen", 100), ("Vessa", 250)] {
-        store.append_delta(1, &delta(who, "max_hp", Op::Set, max)).unwrap().unwrap();
-        store.append_delta(1, &delta(who, "hp", Op::Set, max)).unwrap().unwrap();
+        store
+            .append_delta(1, &delta(who, "max_hp", Op::Set, max))
+            .unwrap()
+            .unwrap();
+        store
+            .append_delta(1, &delta(who, "hp", Op::Set, max))
+            .unwrap()
+            .unwrap();
         // Overheal: rejected as HpAboveMax, with a different `max` payload each time.
-        assert!(store.append_delta(1, &delta(who, "hp", Op::Add, 500)).unwrap().is_err());
+        assert!(
+            store
+                .append_delta(1, &delta(who, "hp", Op::Add, 500))
+                .unwrap()
+                .is_err()
+        );
     }
 
     let reasons = store.rejection_reasons().unwrap();
@@ -93,12 +119,30 @@ fn rejection_reasons_group_by_code_not_by_payload() {
 #[test]
 fn rejection_reasons_are_ordered_most_frequent_first() {
     let store = store_with_two_characters();
-    store.append_delta(1, &delta("Kaelen", "xp", Op::Set, 500)).unwrap().unwrap();
+    store
+        .append_delta(1, &delta("Kaelen", "xp", Op::Set, 500))
+        .unwrap()
+        .unwrap();
 
     // Two XpWouldDecrease, one UnknownField.
-    assert!(store.append_delta(1, &delta("Kaelen", "xp", Op::Sub, 1)).unwrap().is_err());
-    assert!(store.append_delta(1, &delta("Kaelen", "xp", Op::Set, 0)).unwrap().is_err());
-    assert!(store.append_delta(1, &delta("Kaelen", "charisma", Op::Set, 9)).unwrap().is_err());
+    assert!(
+        store
+            .append_delta(1, &delta("Kaelen", "xp", Op::Sub, 1))
+            .unwrap()
+            .is_err()
+    );
+    assert!(
+        store
+            .append_delta(1, &delta("Kaelen", "xp", Op::Set, 0))
+            .unwrap()
+            .is_err()
+    );
+    assert!(
+        store
+            .append_delta(1, &delta("Kaelen", "charisma", Op::Set, 9))
+            .unwrap()
+            .is_err()
+    );
 
     let reasons = store.rejection_reasons().unwrap();
     assert_eq!(reasons[0], ("XpWouldDecrease".to_string(), 2));
@@ -109,8 +153,14 @@ fn rejection_reasons_are_ordered_most_frequent_first() {
 #[test]
 fn rewound_rows_do_not_count_as_rejections() {
     let store = store_with_two_characters();
-    store.append_delta(40, &delta("Kaelen", "hp", Op::Set, 100)).unwrap().unwrap();
-    store.append_delta(41, &delta("Kaelen", "hp", Op::Sub, 60)).unwrap().unwrap();
+    store
+        .append_delta(40, &delta("Kaelen", "hp", Op::Set, 100))
+        .unwrap()
+        .unwrap();
+    store
+        .append_delta(41, &delta("Kaelen", "hp", Op::Sub, 60))
+        .unwrap()
+        .unwrap();
 
     assert_eq!(store.rejected_count().unwrap(), 0);
     assert_eq!(store.rewind(40).unwrap(), 1);
@@ -126,10 +176,22 @@ fn rewound_rows_do_not_count_as_rejections() {
 #[test]
 fn rewind_preview_matches_what_rewind_does() {
     let store = store_with_two_characters();
-    store.append_delta(40, &delta("Kaelen", "hp", Op::Set, 100)).unwrap().unwrap();
-    store.append_delta(41, &delta("Kaelen", "hp", Op::Sub, 10)).unwrap().unwrap();
-    store.append_delta(41, &delta("Kaelen", "gold", Op::Add, 5)).unwrap().unwrap();
-    store.append_delta(43, &delta("Vessa", "hp", Op::Set, 80)).unwrap().unwrap();
+    store
+        .append_delta(40, &delta("Kaelen", "hp", Op::Set, 100))
+        .unwrap()
+        .unwrap();
+    store
+        .append_delta(41, &delta("Kaelen", "hp", Op::Sub, 10))
+        .unwrap()
+        .unwrap();
+    store
+        .append_delta(41, &delta("Kaelen", "gold", Op::Add, 5))
+        .unwrap()
+        .unwrap();
+    store
+        .append_delta(43, &delta("Vessa", "hp", Op::Set, 80))
+        .unwrap()
+        .unwrap();
 
     let (rows, chapters) = store.rewind_preview(40).unwrap();
     assert_eq!(rows, 3);
@@ -145,7 +207,10 @@ fn rewind_preview_matches_what_rewind_does() {
 #[test]
 fn rewind_marks_rows_with_the_shared_reason_constant() {
     let store = store_with_two_characters();
-    store.append_delta(41, &delta("Kaelen", "hp", Op::Set, 100)).unwrap().unwrap();
+    store
+        .append_delta(41, &delta("Kaelen", "hp", Op::Set, 100))
+        .unwrap()
+        .unwrap();
     store.rewind(40).unwrap();
     assert_eq!(REWOUND_REASON, "rewound");
     assert_eq!(store.applied_count().unwrap(), 0);

@@ -50,6 +50,13 @@ pub struct PromptOutcome {
     pub path: PathBuf,
     pub created: bool,
     pub changed: bool,
+    /// Content still byte-identical to [`STARTER_PROMPT`].
+    ///
+    /// This, not `created`, is what decides whether to tell the operator the premise
+    /// is a placeholder: `litrpg init` creates the file, so a subsequent
+    /// `litrpg prompt` that changes nothing has `created == false` while the story
+    /// still has no premise.
+    pub is_placeholder: bool,
     pub hash: String,
     pub previous_hash: String,
     pub bytes: usize,
@@ -146,6 +153,7 @@ fn finish(path: &Path, created: bool, previous_hash: String) -> Result<PromptOut
         path: path.to_path_buf(),
         created,
         changed: hash != previous_hash,
+        is_placeholder: after == STARTER_PROMPT,
         previous_hash,
         bytes: after.len(),
         hash,
@@ -163,13 +171,14 @@ pub fn render_text(o: &PromptOutcome) -> String {
     out.push_str(&format!("{}\n", o.path.display()));
     out.push_str(&format!("  hash   {}\n", o.hash));
     out.push_str(&format!("  bytes  {}\n", o.bytes));
-    match (o.created, o.changed) {
-        (_, true) => out.push_str(
+    match (o.changed, o.is_placeholder) {
+        (true, _) => out.push_str(
             "\nPrompt changed. Takes effect at the next chapter boundary —\nthe chapter currently rendering keeps the old prompt (spec §9.3).\n",
         ),
-        // Created but left alone: "no change" would be technically true and
-        // practically misleading — the story has no premise yet.
-        (true, false) => out.push_str(
+        // Keyed on content, not on who created the file: `litrpg init` writes the
+        // template, so a later `litrpg prompt` that changes nothing would otherwise
+        // report "no change" while the story still has no premise.
+        (false, true) => out.push_str(
             "\nStill the unedited starter template. Fill in the premise, protagonist\nand tone before the next chapter is written.\n",
         ),
         (false, false) => out.push_str("\nNo change to the prompt.\n"),

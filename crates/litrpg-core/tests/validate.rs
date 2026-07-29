@@ -45,10 +45,7 @@ fn text_delta(field: &str, op: Op, value: Option<&str>) -> Delta {
 
 #[test]
 fn accepts_a_plain_damage_delta() {
-    let snap = fold(&[
-        set("Kaelen", "hp", 100),
-        set_at(2, "Kaelen", "max_hp", 100),
-    ]);
+    let snap = fold(&[set("Kaelen", "hp", 100), set_at(2, "Kaelen", "max_hp", 100)]);
     let d = delta("Kaelen", "hp", Op::Sub, 12);
     assert_eq!(validate_delta(&snap, &known(&["Kaelen"]), &d), Ok(()));
 }

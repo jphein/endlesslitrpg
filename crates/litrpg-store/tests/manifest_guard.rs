@@ -46,7 +46,9 @@ fn rejects_a_gap_between_segments() {
     let store = store_with_chapter();
     // 100..150 is a hole: every later byte offset would address the wrong audio.
     let m = Manifest::new(1, vec![seg(0, 0, 100), seg(1, 150, 200)]);
-    let err = store.attach_audio(1, &m, "0001.pcm", "0001.mp3").unwrap_err();
+    let err = store
+        .attach_audio(1, &m, "0001.pcm", "0001.mp3")
+        .unwrap_err();
     assert!(err.to_string().contains("not contiguous"), "{err}");
 
     // And nothing was written: the chapter still has no audio.
@@ -59,7 +61,9 @@ fn rejects_a_gap_between_segments() {
 fn rejects_segments_that_do_not_start_at_zero() {
     let store = store_with_chapter();
     let m = Manifest::new(1, vec![seg(0, 40, 100)]);
-    let err = store.attach_audio(1, &m, "0001.pcm", "0001.mp3").unwrap_err();
+    let err = store
+        .attach_audio(1, &m, "0001.pcm", "0001.mp3")
+        .unwrap_err();
     assert!(err.to_string().contains("not contiguous"), "{err}");
 }
 
@@ -69,7 +73,9 @@ fn rejects_duration_disagreeing_with_the_last_segment() {
     let mut m = Manifest::new(1, vec![seg(0, 0, 4120)]);
     // Simulate a caller that computed duration from predicted rather than final PCM.
     m.duration_ms = 4096;
-    let err = store.attach_audio(1, &m, "0001.pcm", "0001.mp3").unwrap_err();
+    let err = store
+        .attach_audio(1, &m, "0001.pcm", "0001.mp3")
+        .unwrap_err();
     assert!(err.to_string().contains("disagrees"), "{err}");
 }
 

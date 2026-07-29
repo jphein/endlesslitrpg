@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use thiserror::Error;
 
 pub mod cast;
+pub mod init;
 pub mod note;
 pub mod prompt;
 pub mod render;
@@ -21,6 +22,9 @@ pub mod status;
 pub enum CliError {
     #[error(transparent)]
     Store(#[from] litrpg_store::StoreError),
+
+    #[error(transparent)]
+    Config(#[from] litrpg_config::ConfigError),
 
     #[error("a director note must contain non-whitespace text")]
     EmptyNote,

@@ -39,8 +39,16 @@ fn lore_is_readable_after_being_written() {
         5,
     )
     .unwrap();
-    s.upsert_lore("The System", "rule", "system", "Speaks in panes.", 100, true, 1)
-        .unwrap();
+    s.upsert_lore(
+        "The System",
+        "rule",
+        "system",
+        "Speaks in panes.",
+        100,
+        true,
+        1,
+    )
+    .unwrap();
 
     let rows = s.lore().unwrap();
     assert_eq!(rows.len(), 2);
@@ -75,7 +83,8 @@ fn upserting_lore_replaces_rather_than_duplicates() {
 fn summaries_come_back_oldest_first() {
     let s = store();
     for n in 1..=6 {
-        s.put_chapter_summary(n, &format!("Chapter {n} happened.")).unwrap();
+        s.put_chapter_summary(n, &format!("Chapter {n} happened."))
+            .unwrap();
     }
 
     let recent = s.recent_chapter_summaries(3).unwrap();
@@ -102,7 +111,8 @@ fn asking_for_more_summaries_than_exist_is_fine() {
 fn putting_a_summary_twice_replaces_it() {
     let s = store();
     s.put_chapter_summary(7, "First extraction.").unwrap();
-    s.put_chapter_summary(7, "Second extraction, after state_dirty.").unwrap();
+    s.put_chapter_summary(7, "Second extraction, after state_dirty.")
+        .unwrap();
 
     let all = s.recent_chapter_summaries(10).unwrap();
     assert_eq!(all.len(), 1);
@@ -132,7 +142,10 @@ fn summary_identity_is_level_plus_range() {
 
     // Two distinct arc rows, the first replaced rather than duplicated.
     let arcs = s.recent_chapter_summaries(10).unwrap();
-    assert!(arcs.is_empty(), "arc rows must not appear as chapter summaries");
+    assert!(
+        arcs.is_empty(),
+        "arc rows must not appear as chapter summaries"
+    );
 }
 
 #[test]

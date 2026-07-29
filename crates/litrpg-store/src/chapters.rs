@@ -5,7 +5,6 @@ use rusqlite::params;
 
 use crate::{Result, Store, StoreError, now_ms};
 
-
 fn kind_str(k: SpeakerKind) -> &'static str {
     match k {
         SpeakerKind::Narrator => "narrator",

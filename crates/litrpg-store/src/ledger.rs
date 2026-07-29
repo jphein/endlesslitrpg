@@ -8,7 +8,6 @@ use rusqlite::params;
 
 use crate::{Result, Store, now_ms};
 
-
 fn op_str(op: Op) -> &'static str {
     match op {
         Op::Set => "set",

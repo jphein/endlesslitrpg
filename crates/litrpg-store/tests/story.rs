@@ -22,11 +22,19 @@ fn absent_until_created() {
 #[test]
 fn insert_if_absent_reports_whether_it_inserted() {
     let store = Store::open_in_memory().unwrap();
-    assert!(store.insert_story_if_absent(&new_story("Endless", "Kaelen")).unwrap());
+    assert!(
+        store
+            .insert_story_if_absent(&new_story("Endless", "Kaelen"))
+            .unwrap()
+    );
 
     // Second call is a no-op and says so, rather than clobbering — this is what
     // makes `litrpg init` safe to re-run.
-    assert!(!store.insert_story_if_absent(&new_story("Overwritten", "Vessa")).unwrap());
+    assert!(
+        !store
+            .insert_story_if_absent(&new_story("Overwritten", "Vessa"))
+            .unwrap()
+    );
 
     let s = store.story().unwrap().unwrap();
     assert_eq!(s.title, "Endless");
@@ -92,7 +100,11 @@ fn insert_if_absent_also_leaves_the_outline_alone() {
     let outline = "## Arc 1\nThe vale.";
     store.set_arc_outline(outline).unwrap();
 
-    assert!(!store.insert_story_if_absent(&new_story("Nope", "Nobody")).unwrap());
+    assert!(
+        !store
+            .insert_story_if_absent(&new_story("Nope", "Nobody"))
+            .unwrap()
+    );
     assert_eq!(store.story().unwrap().unwrap().arc_outline_md, outline);
 }
 

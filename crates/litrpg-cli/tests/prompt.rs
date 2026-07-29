@@ -113,6 +113,33 @@ fn a_freshly_created_template_says_it_is_unedited_not_unchanged() {
 }
 
 #[test]
+fn a_template_left_by_init_is_still_reported_as_unedited() {
+    // The init -> prompt handoff: `litrpg init` creates the template, so this call
+    // has created == false. Keying the message on `created` would report "no change"
+    // while the story still has no premise. Found by smoke-testing the real binary.
+    let dir = tmp();
+    let path = dir.path().join("prompt.md");
+    std::fs::write(&path, prompt::STARTER_PROMPT).unwrap();
+
+    let o = prompt::edit_prompt(&path, &noop_editor()).unwrap();
+    assert!(!o.created, "the file already existed");
+    assert!(!o.changed);
+    assert!(o.is_placeholder);
+    let out = prompt::render_text(&o);
+    assert!(out.contains("unedited starter template"), "{out}");
+    assert!(!out.contains("No change"), "{out}");
+}
+
+#[test]
+fn an_edited_prompt_is_not_a_placeholder() {
+    let dir = tmp();
+    let path = dir.path().join("prompt.md");
+    std::fs::write(&path, "# A real premise\n").unwrap();
+    let o = prompt::edit_prompt(&path, &noop_editor()).unwrap();
+    assert!(!o.is_placeholder);
+}
+
+#[test]
 fn an_editor_that_changes_nothing_reports_no_change() {
     let dir = tmp();
     let path = dir.path().join("prompt.md");

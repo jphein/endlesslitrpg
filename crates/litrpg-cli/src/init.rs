@@ -67,6 +67,10 @@ pub struct InitReport {
     /// Flags that were supplied but not applied because a story row already exists
     /// and `--force` was not given. Reported rather than silently dropped.
     pub ignored_flags: Vec<String>,
+    /// True when `--force` was given but the existing config loaded fine and so was
+    /// left alone. Reported for the same reason as `ignored_flags`: accepting a flag
+    /// and quietly not acting on it is worse than refusing it.
+    pub config_kept_despite_force: bool,
 }
 
 /// Options mirroring the CLI flags, so `main.rs` stays a thin translation layer.
@@ -82,19 +86,33 @@ pub struct InitOptions {
 /// `config_path` is `None` when the platform has no config dir *and*
 /// `$LITRPG_CONFIG` is unset; there is nowhere to write, which is reported rather
 /// than guessed at.
+///
+/// # `--force` never discards a config that loads
+///
+/// The starter config contains **default paths**. So overwriting a working
+/// `config.toml` does not "reset a file" — it repoints the entire installation at
+/// `~/.local/share/endlesslitrpg`, orphaning whatever database, media and story
+/// directory the operator had configured. Someone running `litrpg init --force` to
+/// reset a placeholder prompt would find their story apparently gone, with the real
+/// data still on disk at a path nothing references any more.
+///
+/// So `force` only rewrites the file when the current one **cannot be loaded**,
+/// which is the case where there are no salvageable paths to protect and a fresh
+/// file is genuinely a repair. Deliberately discarding a valid config stays a
+/// manual `rm` — one obvious step whose intent is unmistakable.
 pub fn ensure_config(path: Option<&Path>, force: bool) -> Result<Action> {
     let Some(path) = path else {
         return Ok(Action::Existed);
     };
-    if path.exists() {
-        if !force {
-            return Ok(Action::Existed);
-        }
+    if !path.exists() {
+        write_config(path)?;
+        return Ok(Action::Created);
+    }
+    if force && Config::load_from(path).is_err() {
         write_config(path)?;
         return Ok(Action::Overwritten);
     }
-    write_config(path)?;
-    Ok(Action::Created)
+    Ok(Action::Existed)
 }
 
 fn write_config(path: &Path) -> Result<()> {
@@ -251,15 +269,25 @@ fn ensure_story(
 
 /// Run the whole sequence.
 ///
-/// `config` is passed in already loaded so the caller controls resolution
-/// (`--config` overrides), and `config_path` is where a starter file should be
-/// written — the two can differ, which is why they are separate arguments.
-pub fn init(
-    config: &Config,
-    config_path: Option<&Path>,
-    opts: &InitOptions,
-) -> Result<InitReport> {
+/// Takes the config *path* rather than a loaded `Config`, and loads it **after**
+/// writing the starter file. That order is load-bearing: under `--force` the config
+/// file is rewritten to defaults, so a `Config` loaded beforehand would describe the
+/// old file while the directories and database get created from the new one. Loading
+/// afterwards guarantees the config on disk is the config that was used.
+///
+/// A side effect worth knowing: because the write precedes the read, `--force` also
+/// repairs a config file that no longer parses. Without `--force` a malformed file is
+/// an error, because replacing the operator's file uninvited is the one thing this
+/// command must never do.
+pub fn init(config_path: Option<&Path>, opts: &InitOptions) -> Result<(Config, InitReport)> {
     let config_action = ensure_config(config_path, opts.force)?;
+
+    let config = match config_path {
+        Some(p) => Config::load_from(p)?,
+        None => Config::load()?,
+    };
+    let config = &config;
+
     let dirs_created = ensure_dirs(config)?;
 
     let prompt_path = config.prompt_path();
@@ -272,7 +300,7 @@ pub fn init(
 
     let story = ensure_story(&store, config, &prompt_path, &prompt_hash, opts)?;
 
-    Ok(InitReport {
+    let report = InitReport {
         config_path: config_path.map(Path::to_path_buf),
         config: config_action,
         db_path: config.db_path.clone(),
@@ -289,7 +317,9 @@ pub fn init(
         target_words: story.target_words,
         prompt_is_placeholder,
         ignored_flags: story.ignored_flags,
-    })
+        config_kept_despite_force: opts.force && config_action == Action::Existed,
+    };
+    Ok((config.clone(), report))
 }
 
 pub fn render_text(r: &InitReport) -> String {
@@ -297,7 +327,11 @@ pub fn render_text(r: &InitReport) -> String {
     out.push_str("Initialised endless-litrpg\n\n");
 
     match &r.config_path {
-        Some(p) => out.push_str(&format!("  config     {} ({})\n", p.display(), r.config.verb())),
+        Some(p) => out.push_str(&format!(
+            "  config     {} ({})\n",
+            p.display(),
+            r.config.verb()
+        )),
         None => out.push_str(
             "  config     no config directory on this platform and $LITRPG_CONFIG is unset;\n\
              \x20            running on built-in defaults\n",
@@ -331,6 +365,22 @@ pub fn render_text(r: &InitReport) -> String {
         }
     }
 
+    if r.config_kept_despite_force {
+        out.push_str(
+            "\n  !! --force did not rewrite config.toml: it loads fine, and the starter\n\
+             \x20    config carries default paths, so replacing it would repoint this\n\
+             \x20    install away from the database above. Delete the file to reset it.\n",
+        );
+    }
+
+    if !r.ignored_flags.is_empty() {
+        // Accepting a flag and doing nothing with it is worse than refusing it.
+        out.push_str(&format!(
+            "\n  !! {} ignored — a story row already exists and init does not\n     overwrite it. Re-run with --force to apply.\n",
+            r.ignored_flags.join(" and ")
+        ));
+    }
+
     out.push_str("\nNext\n");
     if r.prompt_is_placeholder {
         out.push_str(&format!(
@@ -341,7 +391,9 @@ pub fn render_text(r: &InitReport) -> String {
                 .unwrap_or_else(|| "(defaults)".to_string())
         ));
     } else {
-        out.push_str("  litrpg status         — the prompt is already written; you are ready to generate\n");
+        out.push_str(
+            "  litrpg status         — the prompt is already written; you are ready to generate\n",
+        );
     }
     out
 }

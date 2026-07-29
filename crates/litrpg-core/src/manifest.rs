@@ -86,7 +86,13 @@ impl Manifest {
     /// True when segments start at 0 and leave no gaps — required for the byte
     /// offsets to address one continuous PCM stream.
     pub fn is_contiguous(&self) -> bool {
-        self.segments.first().map(|s| s.start_ms == 0).unwrap_or(true)
-            && self.segments.windows(2).all(|w| w[0].end_ms == w[1].start_ms)
+        self.segments
+            .first()
+            .map(|s| s.start_ms == 0)
+            .unwrap_or(true)
+            && self
+                .segments
+                .windows(2)
+                .all(|w| w[0].end_ms == w[1].start_ms)
     }
 }

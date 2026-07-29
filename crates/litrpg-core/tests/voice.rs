@@ -26,5 +26,8 @@ fn round_trips_through_display() {
 fn rejects_malformed_refs() {
     assert_eq!(VoiceRef::parse("sherpa"), Err(VoiceRefError::MissingColon));
     assert_eq!(VoiceRef::parse(":piper"), Err(VoiceRefError::EmptyBackend));
-    assert_eq!(VoiceRef::parse("sherpa:"), Err(VoiceRefError::EmptyRemainder));
+    assert_eq!(
+        VoiceRef::parse("sherpa:"),
+        Err(VoiceRefError::EmptyRemainder)
+    );
 }

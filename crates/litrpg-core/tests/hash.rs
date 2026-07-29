@@ -24,7 +24,10 @@ fn rendered_form_is_tagged_and_fixed_width() {
 
 #[test]
 fn distinct_content_gives_distinct_hashes() {
-    assert_ne!(content_hash("# Story prompt\n"), content_hash("# Story prompt"));
+    assert_ne!(
+        content_hash("# Story prompt\n"),
+        content_hash("# Story prompt")
+    );
     assert_ne!(content_hash("Kaelen"), content_hash("kaelen"));
 }
 

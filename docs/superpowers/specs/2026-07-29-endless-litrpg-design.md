@@ -488,19 +488,41 @@ window `.pcm` is pruned and regenerated on demand from `.mp3` if an older chapte
     { "idx": 0, "speaker": "narrator",
       "voice_ref": "sherpa:piper-en_GB-cori:0",
       "text": "The vale smelled of iron and wet ash.",
-      "start_ms": 0, "end_ms": 4120,
-      "start_byte": 0, "end_byte": 131840 }
+      "kind": "narrator",
+      "start_ms": 0, "end_ms": 4120 }
   ]
 }
 ```
 
-Byte offsets are derivable (`ms × 32`) but **precomputed on purpose**: the watch then does zero
-arithmetic and can issue a `Range` request straight from the manifest.
+**Correction to an earlier draft of this section.** It claimed byte offsets were "precomputed on
+purpose so the watch does zero arithmetic". They are **not serialized** — `litrpg-core` exposes
+`start_byte()`/`end_byte()` as *methods* computing `ms × 32`, and the JSON carries only
+`start_ms`/`end_ms`. The original rationale was also overstated: `ms × 32` is a bit-shift, and
+avoiding one shift was never the point.
 
-They are computed from the **final rendered PCM**, after resampling, SYSTEM colouring and
-`loudnorm` — never from predicted durations, because `loudnorm` alters stream length (§7.5). Each
-segment is zero-padded to a 32-byte boundary first, so `end_ms × 32 == end_byte` holds exactly
-rather than approximately. Constant bitrate is why this
+**The actual point is that no frame table is needed.** At a constant 32 bytes/ms, any timestamp
+converts to a byte offset in closed form. Compressed audio would require a seek index mapping time to
+frame boundaries — an extra artifact to generate, ship, keep in sync, and parse on a 512 KB device.
+That is what constant bitrate buys, and it holds whether or not the offsets are written down.
+
+What makes the conversion trustworthy:
+
+1. Durations are measured from the **final rendered PCM** — after resampling, SYSTEM colouring and
+   `loudnorm` — never from predicted durations, because `loudnorm` alters stream length (§7.5).
+2. Each segment is zero-padded to a **32-byte boundary** before offsets are computed. Note
+   `duration_ms × 32 == len` cannot hold for an arbitrary buffer: 32 bytes is 1 ms, so a legal
+   34-byte buffer is 1.0625 ms, and real renders land there routinely (a measured cori render is
+   1,955,108 bytes = 61,097.125 ms). `duration_ms()` therefore **floors**, and padding is the
+   mechanism that makes the identity exact where it matters. Unpadded, segment *N*'s offset drifts by
+   the accumulated remainders of segments `0..N` — a silent, cumulative desync of highlighting and
+   Range requests that grows across a chapter.
+3. The render path **asserts** `manifest.duration_ms × 32 == pcm.len()` and
+   `manifest.is_contiguous()` before publishing. `Manifest::new()` derives `duration_ms` from the last
+   segment while `chapters.duration_ms` is stored separately; they agree by construction today, but
+   an invariant this load-bearing is checked, not assumed.
+
+Clients are given `bytes_per_ms` on `/api/story` and `total_bytes` on the chapter index so none of
+them hardcodes 32. Constant bitrate is why this
 works at all — compressed audio would need a frame table to answer "where does segment 40 start".
 
 One manifest type in `litrpg-core`, **three consumers**: daemon, Candela highlighting, watch
@@ -529,6 +551,23 @@ highlighting.
 
 Plain HTTP with **no TLS and no DNS** is a hard requirement inherited from the watch, which is why
 `familiar` needs a **pinned static DHCP lease** so `10.0.6.107` cannot drift.
+
+**Authentication: none, accepted deliberately.** Every route is open on a LAN-reachable port. This
+follows from the watch's constraints — it cannot do TLS, so there is no credential worth protecting in
+transit — and from the fact that this is a single-tenant story generator on a trusted `/24`. The
+consequence to be explicit about rather than leave implicit: `POST /api/notes` is the only mutating
+route, so **anything on `10.0.6.0/24` can inject a director note** and thereby steer the story. The
+body is bounded at 4096 bytes to limit the damage. Accepted; revisit if the daemon is ever exposed
+beyond the admin VLAN.
+
+**`/api/version` is hand-rolled, not mounted from realm-sigil.** That crate's `rust/` directory turns
+out to be a `no_std` *name generator*; the one-line handler exists only in the Go/Python/JS bindings.
+The endpoint matches the Go `Version` struct field-for-field so `status.realm.watch` and the
+`<Sigil />` badge keep working. Taking the crate as a dependency was rejected because its own docs
+flag that the Rust word tables were regenerated against a later lexicon and **disagree with the other
+bindings** — hash `9e3779b1` is `Blazing Jewel` in Go and `Draconic Monolith` in Rust — so a project
+consuming both would publish two different names for one commit. That divergence is a bug in
+realm-sigil worth fixing there, not worked around here.
 
 Port 8093 verified free on familiar (8085 mempalace, 8090 bridge, 8091 Ember, 8384 syncthing, 11435
 ollama-embed, 19999 netdata all in use).

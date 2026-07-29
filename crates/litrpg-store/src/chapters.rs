@@ -52,6 +52,10 @@ pub struct ChapterRow {
     pub duration_ms: u32,
     pub has_audio: bool,
     pub state_dirty: bool,
+    /// Unix ms when the chapter row was written. Exposed so the RSS feed's
+    /// `pubDate` reflects when the chapter was *created* rather than the mtime of
+    /// whatever audio file happens to be on disk.
+    pub created_at: i64,
 }
 
 impl Store {
@@ -82,10 +86,11 @@ impl Store {
             duration_ms: r.get::<_, i64>(6)? as u32,
             has_audio: r.get::<_, i64>(7)? != 0,
             state_dirty: r.get::<_, i64>(8)? != 0,
+            created_at: r.get(9)?,
         })
     }
 
-    const CHAPTER_COLUMNS: &'static str = "number, title, text_md, prompt_hash, pcm_path, mp3_path, duration_ms, has_audio, state_dirty";
+    const CHAPTER_COLUMNS: &'static str = "number, title, text_md, prompt_hash, pcm_path, mp3_path, duration_ms, has_audio, state_dirty, created_at";
 
     pub fn chapter(&self, number: u32) -> Result<ChapterRow> {
         let sql = format!(
@@ -144,6 +149,24 @@ impl Store {
         pcm_path: &str,
         mp3_path: &str,
     ) -> Result<()> {
+        // Guard the invariant at the write boundary rather than trusting the caller.
+        // Clients derive Range offsets from these segments, so a non-contiguous
+        // manifest or a duration that disagrees with the last segment produces
+        // audio that plays from the wrong place — silently, and only for listeners.
+        if !manifest.is_contiguous() {
+            return Err(StoreError::InvalidManifest {
+                number,
+                why: "segments are not contiguous from 0",
+            });
+        }
+        let last_end = manifest.segments.last().map(|s| s.end_ms).unwrap_or(0);
+        if manifest.duration_ms != last_end {
+            return Err(StoreError::InvalidManifest {
+                number,
+                why: "duration_ms disagrees with the last segment's end_ms",
+            });
+        }
+
         let chapter_id: i64 = self
             .conn
             .query_row(

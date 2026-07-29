@@ -21,6 +21,8 @@ pub enum StoreError {
     Json(#[from] serde_json::Error),
     #[error("chapter {0} not found")]
     ChapterNotFound(u32),
+    #[error("chapter {number} manifest is invalid: {why}")]
+    InvalidManifest { number: u32, why: &'static str },
     #[error("delta rejected: {0}")]
     Rejected(String),
 }

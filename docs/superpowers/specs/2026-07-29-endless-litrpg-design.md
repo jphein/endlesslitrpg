@@ -331,6 +331,20 @@ was the right fix rather than a weakening: the segments array agrees with the to
 offsets tile with no gap or overlap, every offset is sample-aligned, no segment runs backwards, and
 the window count is *derived* (`total.div_ceil(WINDOW_BYTES)`). None of those can go stale.
 
+The seventh instance was not written by a person. `cargo fmt` joined a line-continued string
+literal and baked the continuation's indentation in as literal spaces:
+
+```
+"`kind` is the only          authority on whether a row can hold stats"
+```
+
+Every test passed, because they `matches!` on the error variant and cannot see the words. So the
+blind spot is not merely "prose a human wrote" but **any text no code consumes** — a formatter,
+a codegen step or a merge can damage it as easily as a typo can, and nothing downstream cares.
+The mitigation that generalises is to assert the **shape** of the prose where its shape matters:
+one line, no run of spaces, under a length bound. That is a property a tool can violate and a
+test can see, without pinning the wording.
+
 One more, learned by writing the same sentence wrong twice in an afternoon: **assert the claim
 positively, not only negatively.** A negative assertion pins the mistake that has already been made
 and nothing else. `!out.contains("restoring the original")` was added the first time that phrase was

@@ -6,7 +6,7 @@ use litrpg_core::ledger::{LedgerEntry, Op, StateSnapshot, fold};
 use litrpg_core::validate::{Delta, Rejection, validate_delta};
 use rusqlite::params;
 
-use crate::{Result, Store, now_ms};
+use crate::{Result, Store, StoreError, now_ms};
 
 fn op_str(op: Op) -> &'static str {
     match op {
@@ -73,6 +73,23 @@ impl Store {
         Ok(())
     }
 
+    /// Reclassify an existing cast member.
+    ///
+    /// Separate from [`Store::upsert_cast`], which deliberately preserves `kind` and
+    /// `first_chapter` as provenance. Reclassification changes who the gate will accept
+    /// stats for (see [`Store::known_subjects`]), so it is an explicit act rather than a
+    /// side effect of assigning a voice. Errors if the speaker is not in the cast.
+    pub fn set_cast_kind(&self, speaker: &str, kind: &str) -> Result<()> {
+        let n = self.conn.execute(
+            "UPDATE cast SET kind = ?2 WHERE speaker = ?1",
+            params![speaker, kind],
+        )?;
+        if n == 0 {
+            return Err(StoreError::UnknownSpeaker(speaker.to_string()));
+        }
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn upsert_lore(
         &self,
@@ -107,17 +124,32 @@ impl Store {
         Ok(())
     }
 
-    /// Cast speakers ∪ *applied* ledger subjects ∪ lore entries of kind `character`.
+    /// Character cast speakers ∪ *applied* ledger subjects ∪ lore entries of kind
+    /// `character`, minus the narrator and SYSTEM.
     ///
     /// The `applied = 1` filter matters: a delta for a misspelled subject is stored
     /// with `applied = 0` for audit, and without the filter that typo would enter
     /// the known set and be silently accepted on the next attempt — the gate would
     /// teach itself the ghost it just rejected.
+    ///
+    /// # Why narrator and SYSTEM are subtracted
+    ///
+    /// Both get `cast` rows, because both need a voice — but neither is a *person* who
+    /// can own stats. Without the exclusion, pass 2 was offered `SYSTEM` as a subject
+    /// and **the gate accepted it**: an entire stat block landed under
+    /// `subject: "SYSTEM"` with `rejected = 0`, so the protagonist's inventory accrued
+    /// to a pseudo-person while his character screen stayed empty — every stage
+    /// reporting success throughout.
+    ///
+    /// The trailing `EXCEPT` is deliberate belt-and-braces. Filtering only the `cast`
+    /// union would still readmit `SYSTEM` through the ledger union on any database that
+    /// already accrued rows under it, which is exactly the state a live run produced.
     pub fn known_subjects(&self) -> Result<BTreeSet<String>> {
         let mut stmt = self.conn.prepare(
-            "SELECT speaker FROM cast
+            "SELECT speaker FROM cast WHERE kind NOT IN ('narrator', 'system')
              UNION SELECT subject FROM ledger WHERE applied = 1
-             UNION SELECT name FROM lore WHERE kind = 'character'",
+             UNION SELECT name FROM lore WHERE kind = 'character'
+             EXCEPT SELECT speaker FROM cast WHERE kind IN ('narrator', 'system')",
         )?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
         Ok(rows.collect::<rusqlite::Result<BTreeSet<_>>>()?)

@@ -39,6 +39,8 @@ pub enum StoreError {
     InvalidManifest { number: u32, why: &'static str },
     #[error("no story row exists; run `litrpg init` first")]
     NoStoryRow,
+    #[error("{0} is not in the cast")]
+    UnknownSpeaker(String),
     #[error("delta rejected: {0}")]
     Rejected(String),
 }

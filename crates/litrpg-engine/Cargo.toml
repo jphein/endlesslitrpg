@@ -21,3 +21,7 @@ tracing = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 tempfile = { workspace = true }
+# The cycle degrades rather than failing (spec §10), so a render failure is a `warn!` and
+# nothing else. Without a subscriber a live test reports `has_audio: false` and takes the
+# reason with it — which is the silent-failure mode this whole design exists to avoid.
+tracing-subscriber = { workspace = true }

@@ -1,11 +1,17 @@
-//! `litrpg status` — buffer health plus the validation-gate drift signal.
+//! `litrpg status` — buffer health, the validation-gate drift signal, and whether
+//! a prompt edit is waiting to take effect.
 //!
 //! Spec §6.2 makes the rejection rate the early warning that the prompt or the
 //! state format is slipping. It is reported as a rate with its top codes, not
 //! buried under the chapter counts.
 
-use litrpg_store::{Result, Store};
+use std::path::PathBuf;
+
+use litrpg_core::hash::content_hash;
+use litrpg_store::Store;
 use serde::Serialize;
+
+use crate::{CliError, Result};
 
 /// Rate at or above which the text renderer marks the rejection line as a
 /// warning. A heuristic, not a spec value — see [`StatusReport::drift_warning`].
@@ -15,6 +21,69 @@ pub const DRIFT_WARN_RATE: f64 = 0.05;
 pub struct RejectionCount {
     pub code: String,
     pub count: i64,
+}
+
+/// Whether the prompt on disk matches the one the engine is actually using.
+///
+/// `story.prompt_hash` is the prompt **currently in effect**: §9.3 reloads only at
+/// chapter boundaries, so after an edit it deliberately lags the file. That lag is
+/// not a defect to hide — comparing it against the file is the only way to tell the
+/// operator "your edit is real but has not been picked up yet", which nothing else
+/// surfaces.
+///
+/// The file hashed is the one `story.prompt_path` names, not `config.prompt_path()`.
+/// The row records where the in-effect prompt came from, so if the config's
+/// `story_dir` has since moved, the row's view is the honest comparison.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "state")]
+pub enum PromptSync {
+    /// No story row at all — nothing has been initialised.
+    NotInitialised,
+    /// The story row names a prompt file that is not on disk.
+    Missing { path: PathBuf, in_effect: String },
+    /// Disk and in-effect agree; there is nothing to say.
+    InSync { hash: String },
+    /// An edit exists on disk that the engine has not loaded yet.
+    Pending {
+        path: PathBuf,
+        in_effect: String,
+        on_disk: String,
+    },
+}
+
+impl PromptSync {
+    pub fn edit_pending(&self) -> bool {
+        matches!(self, Self::Pending { .. })
+    }
+}
+
+/// Compare the in-effect prompt hash against the file the story row names.
+pub fn prompt_sync(store: &Store) -> Result<PromptSync> {
+    let Some(row) = store.story()? else {
+        return Ok(PromptSync::NotInitialised);
+    };
+    let path = PathBuf::from(&row.prompt_path);
+    match std::fs::read_to_string(&path) {
+        Ok(body) => {
+            let on_disk = content_hash(&body);
+            if on_disk == row.prompt_hash {
+                Ok(PromptSync::InSync { hash: on_disk })
+            } else {
+                Ok(PromptSync::Pending {
+                    path,
+                    in_effect: row.prompt_hash,
+                    on_disk,
+                })
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(PromptSync::Missing {
+            path,
+            in_effect: row.prompt_hash,
+        }),
+        // An unreadable-but-present prompt (permissions, a directory in its place)
+        // is a real failure, not a "missing" — do not flatten the two.
+        Err(source) => Err(CliError::Io { path, source }),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -37,6 +106,10 @@ pub struct StatusReport {
     /// `rejected / (applied + rejected)`; 0.0 when no deltas exist at all.
     pub rejection_rate: f64,
     pub top_rejections: Vec<RejectionCount>,
+    pub prompt: PromptSync,
+    /// Duplicates `prompt`'s `Pending` tag on purpose: a script wants a stable
+    /// top-level boolean, not a match on the enum tag.
+    pub prompt_edit_pending: bool,
 }
 
 impl StatusReport {
@@ -77,7 +150,11 @@ pub fn status(store: &Store, buffer_target: u32) -> Result<StatusReport> {
         .map(|(code, count)| RejectionCount { code, count })
         .collect();
 
+    let prompt = prompt_sync(store)?;
+
     Ok(StatusReport {
+        prompt_edit_pending: prompt.edit_pending(),
+        prompt,
         latest_chapter,
         total_chapters: chapters.len(),
         chapters_with_audio,
@@ -94,8 +171,54 @@ pub fn status(store: &Store, buffer_target: u32) -> Result<StatusReport> {
 
 /// Human-readable rendering. The rejection block comes first among the delta
 /// lines and is prefixed when it warrants attention, per §6.2.
+/// Prompt-sync block. `InSync` renders nothing — a status command that says
+/// "everything is fine" about every subsystem trains you to stop reading it.
+fn render_prompt_sync(out: &mut String, r: &StatusReport) {
+    match &r.prompt {
+        PromptSync::InSync { .. } => {}
+
+        PromptSync::NotInitialised => {
+            out.push_str(
+                "!! Not initialised — there is no story row.\n\
+                 !! Run `litrpg init` before anything else.\n\n",
+            );
+        }
+
+        PromptSync::Missing { path, in_effect } => {
+            out.push_str(&format!(
+                "!! The story prompt is missing from disk:\n\
+                 !!   {}\n\
+                 !! The engine still holds {in_effect} as the prompt in effect, so\n\
+                 !! chapters keep generating — but the file of record is gone.\n\
+                 !! Restore it from git, or run `litrpg prompt` to start a new one.\n\n",
+                path.display()
+            ));
+        }
+
+        PromptSync::Pending {
+            path,
+            in_effect,
+            on_disk,
+        } => {
+            out.push_str(&format!(
+                "Prompt edit pending\n\
+                 \x20 on disk    {on_disk}\n\
+                 \x20 in effect  {in_effect}\n\
+                 \x20 file       {}\n\n\
+                 \x20 {} has been edited but not loaded. It takes effect at the next\n\
+                 \x20 chapter boundary; the chapter generating now keeps the old prompt (§9.3).\n\n",
+                path.display(),
+                path.file_name()
+                    .map(|f| f.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "The prompt".to_string()),
+            ));
+        }
+    }
+}
+
 pub fn render_text(r: &StatusReport) -> String {
     let mut out = String::new();
+    render_prompt_sync(&mut out, r);
 
     out.push_str("Chapters\n");
     out.push_str(&format!("  latest            {}\n", r.latest_chapter));

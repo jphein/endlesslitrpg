@@ -25,19 +25,19 @@ pub const MIN_BUFFER_TARGET: u32 = 2;
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
-    #[error("reading {path}: {source}")]
+    #[error("cannot read {path}")]
     Read {
         path: PathBuf,
         #[source]
         source: std::io::Error,
     },
-    #[error("writing {path}: {source}")]
+    #[error("cannot write {path}")]
     Write {
         path: PathBuf,
         #[source]
         source: std::io::Error,
     },
-    #[error("parsing {path}: {source}")]
+    #[error("cannot parse {path}")]
     Parse {
         path: PathBuf,
         #[source]
@@ -47,7 +47,7 @@ pub enum ConfigError {
     EmptyPath { field: &'static str },
     #[error("buffer_target is {got}, but the minimum is {min} (spec §6.0)")]
     BufferTargetTooLow { got: u32, min: u32 },
-    #[error("bind_addr {got:?} is not a valid socket address: {source}")]
+    #[error("bind_addr {got:?} is not a valid socket address")]
     BadBindAddr {
         got: String,
         #[source]

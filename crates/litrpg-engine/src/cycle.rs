@@ -382,6 +382,7 @@ where
         let known: Vec<String> = self
             .with_store(|s| s.known_subjects())?
             .into_iter()
+            .filter(|s| !is_voice_not_a_person(s))
             .collect();
         let extraction = self.pass2(&plain_text, &known).await;
         let state_dirty = extraction.is_none();
@@ -434,6 +435,19 @@ where
                         continue;
                     }
                 };
+
+                // The gate would *accept* these, because `narrator` and `SYSTEM` are cast
+                // rows and therefore known subjects. Stopping them here keeps a stat block's
+                // numbers from accruing to a voice instead of to the character it describes.
+                if is_voice_not_a_person(&delta.subject) {
+                    warn!(
+                        subject = %delta.subject,
+                        field = %delta.field,
+                        "refusing a delta addressed to a voice rather than a character"
+                    );
+                    rejected += 1;
+                    continue;
+                }
                 match self.with_store(|s| s.append_delta(number, &delta))? {
                     Ok(()) => applied += 1,
                     Err(reason) => {
@@ -742,7 +756,7 @@ pub fn derive_title(number: u32, summary: Option<&str>) -> String {
         .next()
         .unwrap_or("")
         .trim();
-    if first.is_empty() {
+    if first.is_empty() || is_placeholder_title(first) {
         return fallback;
     }
     if first.chars().count() <= TITLE_MAX {
@@ -765,6 +779,35 @@ pub fn derive_title(number: u32, summary: Option<&str>) -> String {
     } else {
         format!("{out}…")
     }
+}
+
+/// Whether a model-supplied title is a template stub rather than a name.
+///
+/// Measured live: pass 2 returned `"Chapter [Insert Chapter Number]"`. Publishing that as an
+/// RSS item title, a Candela chapter name and a line on the watch would look like a bug in
+/// every client at once, so an obvious stub falls back to `Chapter N` — which is at least
+/// honest.
+fn is_placeholder_title(t: &str) -> bool {
+    let lower = t.to_lowercase();
+    t.contains('[')
+        || t.contains(']')
+        || t.contains('<')
+        || lower.starts_with("chapter")
+        || lower.starts_with("untitled")
+        || lower.contains("insert")
+}
+
+/// Speaker names that are voices rather than people, and so can never be ledger subjects.
+///
+/// `cast` holds a row for `narrator` and `SYSTEM` because they need voices, and the store's
+/// `known_subjects()` unions every cast speaker — which means both are offered to pass 2 as
+/// legitimate subjects and accepted by the gate. Measured live: pass 2 duly attributed a
+/// whole stat block to `subject: "SYSTEM"`, so Kaelen's inventory landed under a pseudo-person
+/// and his own character screen stayed empty. Filtered on both sides here: out of the
+/// known-subject list the model sees, and out of the deltas that reach the ledger.
+fn is_voice_not_a_person(subject: &str) -> bool {
+    subject.eq_ignore_ascii_case(litrpg_ember::parse::NARRATOR)
+        || subject.eq_ignore_ascii_case(litrpg_ember::parse::SYSTEM)
 }
 
 /// Every chapter that has prose but no audio, oldest first.
@@ -834,6 +877,49 @@ mod tests {
             derive_title(4, Some("Kaelen broke the first seal. Sera watched.")),
             "Kaelen broke the first seal"
         );
+    }
+
+    #[test]
+    fn derive_title_rejects_the_placeholder_titles_the_model_really_emits() {
+        // All measured or one edit away from measured.
+        for junk in [
+            "Chapter [Insert Chapter Number]",
+            "Chapter 1",
+            "chapter one: the vale",
+            "[Chapter Title]",
+            "Untitled",
+            "Insert title here",
+            "<title>",
+        ] {
+            assert_eq!(
+                derive_title(7, Some(junk)),
+                "Chapter 7",
+                "{junk:?} is a stub and must not be published as a chapter name"
+            );
+        }
+    }
+
+    #[test]
+    fn derive_title_keeps_a_real_title() {
+        for good in [
+            "The First Seal Breaks",
+            "A Debt Collected in Ash",
+            "Sera Names Her Price",
+        ] {
+            assert_eq!(derive_title(7, Some(good)), good);
+        }
+    }
+
+    #[test]
+    fn voices_are_never_ledger_subjects() {
+        assert!(is_voice_not_a_person("narrator"));
+        assert!(is_voice_not_a_person("NARRATOR"));
+        assert!(is_voice_not_a_person("SYSTEM"));
+        assert!(is_voice_not_a_person("system"));
+        assert!(!is_voice_not_a_person("Kaelen"));
+        assert!(!is_voice_not_a_person("Sera"));
+        // A character whose name merely contains one of them is still a person.
+        assert!(!is_voice_not_a_person("Systemsmith"));
     }
 
     #[test]

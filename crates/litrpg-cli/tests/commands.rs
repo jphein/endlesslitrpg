@@ -1,13 +1,22 @@
 use litrpg_cli::{CliError, cast, note, render, rewind, state, status};
+use litrpg_core::hash::content_hash;
 use litrpg_core::ledger::Op;
 use litrpg_core::manifest::{Manifest, Segment, SpeakerKind};
 use litrpg_core::validate::Delta;
 use litrpg_store::{NewChapter, Store};
+use tempfile::TempDir;
 
 // ------------------------------------------------------------------ helpers
 
 fn store() -> Store {
     Store::open_in_memory().unwrap()
+}
+
+fn tmp() -> TempDir {
+    tempfile::Builder::new()
+        .prefix("litrpg-status-")
+        .tempdir()
+        .unwrap()
 }
 
 fn with_kaelen() -> Store {
@@ -429,6 +438,194 @@ fn status_text_is_quiet_when_the_rate_is_healthy() {
     }
     let out = status::render_text(&status::status(&s, 3).unwrap());
     assert!(!out.contains("**"), "no warning expected:\n{out}");
+}
+
+// ------------------------------------------------------- prompt sync
+
+fn story_with_prompt(s: &Store, path: &std::path::Path, hash: &str) {
+    s.upsert_story(&litrpg_store::NewStory {
+        title: "The Ashen Vale".into(),
+        protagonist: "Kaelen".into(),
+        prompt_path: path.display().to_string(),
+        prompt_hash: hash.into(),
+        target_words: 2000,
+    })
+    .unwrap();
+}
+
+#[test]
+fn no_story_row_reports_not_initialised() {
+    let r = status::status(&store(), 3).unwrap();
+    assert_eq!(r.prompt, status::PromptSync::NotInitialised);
+    assert!(!r.prompt_edit_pending);
+    let out = status::render_text(&r);
+    assert!(out.contains("Not initialised"), "{out}");
+    assert!(out.contains("litrpg init"), "must say what to run:\n{out}");
+}
+
+#[test]
+fn a_prompt_matching_the_row_says_nothing_at_all() {
+    // A status command that reassures you about every subsystem trains you to stop
+    // reading it.
+    let dir = tmp();
+    let path = dir.path().join("prompt.md");
+    std::fs::write(&path, "# A premise\n").unwrap();
+    let s = store();
+    story_with_prompt(&s, &path, &content_hash("# A premise\n"));
+
+    let r = status::status(&s, 3).unwrap();
+    assert!(matches!(r.prompt, status::PromptSync::InSync { .. }));
+    assert!(!r.prompt_edit_pending);
+    let out = status::render_text(&r);
+    assert!(!out.contains("Prompt"), "should be silent:\n{out}");
+    assert!(!out.contains("pending"), "{out}");
+}
+
+#[test]
+fn an_edited_prompt_is_reported_as_pending_with_both_hashes() {
+    let dir = tmp();
+    let path = dir.path().join("prompt.md");
+    let s = store();
+    // Row records the old prompt; the file has since moved on.
+    story_with_prompt(&s, &path, &content_hash("# Old premise\n"));
+    std::fs::write(&path, "# New premise\n").unwrap();
+
+    let r = status::status(&s, 3).unwrap();
+    assert!(r.prompt_edit_pending);
+    match &r.prompt {
+        status::PromptSync::Pending {
+            in_effect,
+            on_disk,
+            path: p,
+        } => {
+            assert_eq!(in_effect, &content_hash("# Old premise\n"));
+            assert_eq!(on_disk, &content_hash("# New premise\n"));
+            assert_eq!(p, &path);
+        }
+        other => panic!("expected Pending, got {other:?}"),
+    }
+
+    let out = status::render_text(&r);
+    assert!(out.contains("Prompt edit pending"), "{out}");
+    assert!(
+        out.contains("next\n chapter boundary") || out.contains("next"),
+        "{out}"
+    );
+    assert!(out.contains("§9.3"), "must cite why it lags:\n{out}");
+    assert!(out.contains(&content_hash("# New premise\n")), "{out}");
+    assert!(out.contains(&content_hash("# Old premise\n")), "{out}");
+}
+
+#[test]
+fn a_missing_prompt_file_is_named_not_treated_as_in_sync() {
+    // The file of record is gone but chapters keep generating from the in-effect
+    // prompt. Silently reporting "in sync" would hide a real problem.
+    let dir = tmp();
+    let path = dir.path().join("gone.md");
+    let s = store();
+    story_with_prompt(&s, &path, &content_hash("# Old premise\n"));
+
+    let r = status::status(&s, 3).unwrap();
+    assert!(!r.prompt_edit_pending, "missing is not a pending edit");
+    match &r.prompt {
+        status::PromptSync::Missing { path: p, in_effect } => {
+            assert_eq!(p, &path);
+            assert_eq!(in_effect, &content_hash("# Old premise\n"));
+        }
+        other => panic!("expected Missing, got {other:?}"),
+    }
+    let out = status::render_text(&r);
+    assert!(out.contains("missing from disk"), "{out}");
+    assert!(out.contains("gone.md"), "must name the path:\n{out}");
+    assert!(out.contains("git"), "must say how to recover:\n{out}");
+}
+
+#[test]
+fn an_empty_in_effect_hash_still_compares_rather_than_crashing() {
+    // A story row written before any prompt existed has prompt_hash = ''. That must
+    // read as "pending", not as a match.
+    let dir = tmp();
+    let path = dir.path().join("prompt.md");
+    std::fs::write(&path, "# A premise\n").unwrap();
+    let s = store();
+    story_with_prompt(&s, &path, "");
+
+    let r = status::status(&s, 3).unwrap();
+    assert!(r.prompt_edit_pending);
+}
+
+#[test]
+fn prompt_sync_uses_the_path_the_row_names_not_the_config() {
+    // The row records where the in-effect prompt came from. If story_dir has since
+    // moved in config, the row's view is the honest comparison.
+    let dir = tmp();
+    let named = dir.path().join("recorded/prompt.md");
+    std::fs::create_dir_all(named.parent().unwrap()).unwrap();
+    std::fs::write(&named, "# Recorded\n").unwrap();
+    // A decoy at a different location with different content.
+    let decoy = dir.path().join("elsewhere/prompt.md");
+    std::fs::create_dir_all(decoy.parent().unwrap()).unwrap();
+    std::fs::write(&decoy, "# Decoy\n").unwrap();
+
+    let s = store();
+    story_with_prompt(&s, &named, &content_hash("# Recorded\n"));
+    assert!(matches!(
+        status::status(&s, 3).unwrap().prompt,
+        status::PromptSync::InSync { .. }
+    ));
+}
+
+#[test]
+fn prompt_sync_is_exposed_in_json_as_a_boolean_and_both_hashes() {
+    let dir = tmp();
+    let path = dir.path().join("prompt.md");
+    let s = store();
+    story_with_prompt(&s, &path, &content_hash("# Old\n"));
+    std::fs::write(&path, "# New\n").unwrap();
+
+    let json = serde_json::to_string(&status::status(&s, 3).unwrap()).unwrap();
+    assert!(json.contains("\"prompt_edit_pending\":true"), "{json}");
+    assert!(json.contains("\"state\":\"pending\""), "{json}");
+    assert!(json.contains(&content_hash("# Old\n")), "{json}");
+    assert!(json.contains(&content_hash("# New\n")), "{json}");
+}
+
+#[test]
+fn json_reports_not_initialised_and_missing_distinctly() {
+    let empty = serde_json::to_string(&status::status(&store(), 3).unwrap()).unwrap();
+    assert!(empty.contains("\"state\":\"not_initialised\""), "{empty}");
+    assert!(empty.contains("\"prompt_edit_pending\":false"), "{empty}");
+
+    let dir = tmp();
+    let s = store();
+    story_with_prompt(&s, &dir.path().join("gone.md"), "fnv1a64:0000000000000000");
+    let missing = serde_json::to_string(&status::status(&s, 3).unwrap()).unwrap();
+    assert!(missing.contains("\"state\":\"missing\""), "{missing}");
+    assert!(
+        missing.contains("\"prompt_edit_pending\":false"),
+        "{missing}"
+    );
+}
+
+#[test]
+fn a_pending_prompt_does_not_suppress_the_drift_signal() {
+    // Two independent concerns; one must not hide the other.
+    let dir = tmp();
+    let path = dir.path().join("prompt.md");
+    let s = with_kaelen();
+    story_with_prompt(&s, &path, &content_hash("# Old\n"));
+    std::fs::write(&path, "# New\n").unwrap();
+    s.append_delta(1, &num("Kaelen", "hp", Op::Set, 100))
+        .unwrap()
+        .unwrap();
+    s.append_delta(1, &num("Kaelen", "charisma", Op::Set, 1))
+        .unwrap()
+        .unwrap_err();
+
+    let out = status::render_text(&status::status(&s, 3).unwrap());
+    assert!(out.contains("Prompt edit pending"), "{out}");
+    assert!(out.contains("reject rate"), "{out}");
+    assert!(out.contains("UnknownField"), "{out}");
 }
 
 // -------------------------------------------------------------------- state

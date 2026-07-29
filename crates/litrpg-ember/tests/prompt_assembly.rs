@@ -355,6 +355,23 @@ fn pass1_teaches_the_exact_tag_format_the_parser_accepts() {
     );
 }
 
+/// Measured 2026-07-29: a live chapter came back with **no `[SYSTEM]` block at all**, so
+/// pass 2 correctly proposed zero deltas and the ledger could never advance. A LitRPG with
+/// no RPG layer looks like a working pipeline — every stage reports success — while the
+/// numbers the whole design exists to keep consistent simply never appear.
+#[test]
+fn pass1_requires_at_least_one_system_block() {
+    let text = pass1_text(&sample_input(&[], &[], &[]));
+    assert!(
+        text.contains("at least one [SYSTEM] block"),
+        "the model must be required to emit an RPG readout, or state never changes"
+    );
+    assert!(
+        text.contains("mana") || text.contains("stamina"),
+        "naming the stats that get discarded is cheaper than a rejection: {text}"
+    );
+}
+
 #[test]
 fn pass1_omits_empty_sections_rather_than_shipping_dangling_headings() {
     let text = pass1_text(&sample_input(&[], &[], &[]));

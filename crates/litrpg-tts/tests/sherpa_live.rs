@@ -20,7 +20,9 @@
 
 use litrpg_core::{BYTES_PER_MS, Manifest, Segment, SpeakerKind};
 use litrpg_tts::sherpa::{SherpaBackend, SherpaConfig};
-use litrpg_tts::{Availability, DEFAULT_GAP_MS, Pcm16k, RenderRequest, TtsBackend, assemble};
+use litrpg_tts::{
+    Availability, DEFAULT_GAP_MS, Pcm16k, PostProcessor, RenderRequest, TtsBackend, assemble,
+};
 
 const CORI: &str = "piper-en_GB-cori-high:0";
 const KOKORO: &str = "kokoro-multi-lang-v1_0";

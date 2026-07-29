@@ -17,6 +17,14 @@
 //! # Cost control
 //!
 //! `target_words` is set to a few hundred, not the spec's 2000. One short chapter.
+//!
+//! # Logging is not optional here
+//!
+//! The cycle *degrades* rather than failing: a render failure leaves the text published,
+//! sets `has_audio = false`, and says why in a `warn!` (§10). With no subscriber installed
+//! that reason goes nowhere, and the test reports "audio failed" while destroying the only
+//! explanation — the exact silent-failure shape the design exists to prevent. Every test
+//! here calls [`init_logging`] first.
 
 use std::sync::{Arc, Mutex};
 
@@ -41,6 +49,22 @@ const AZURE_CHARACTERS: &[&str] = &[
     "azure:en-US-Ava:DragonHDLatestNeural",
 ];
 
+/// Install a `tracing` subscriber so the cycle's `warn!` for a swallowed failure is visible.
+///
+/// Idempotent: `try_init` is used because several tests in one binary share a process, and a
+/// second install would otherwise panic and mask whatever the test was actually checking.
+/// `RUST_LOG` overrides the default.
+fn init_logging() {
+    use tracing_subscriber::EnvFilter;
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("litrpg_engine=debug,litrpg_tts=debug")),
+        )
+        .with_test_writer()
+        .try_init();
+}
+
 const PREMISE: &str = "\
 Kaelen is a debt-collector for a dead god, working the Ashen Vale where the god's unpaid \
 contracts still hold. Grim, dry, close third person, past tense. His associate Sera watches \
@@ -49,6 +73,7 @@ the exits and says the thing he does not want to hear.";
 #[tokio::test]
 #[ignore = "costs GPU time on familiar and Azure credit"]
 async fn one_real_chapter_end_to_end() {
+    init_logging();
     let dir = tempfile::tempdir().expect("temp dir");
     let db_path = dir.path().join("story.db");
     let media_dir = dir.path().join("media");
@@ -136,7 +161,9 @@ async fn one_real_chapter_end_to_end() {
             applied,
             rejected,
         } => (chapter, has_audio, state_dirty, applied, rejected),
-        CycleOutcome::Abandoned { reason, backoff, .. } => {
+        CycleOutcome::Abandoned {
+            reason, backoff, ..
+        } => {
             panic!("pass 1 failed: {reason} (backoff={backoff})")
         }
         other => panic!("expected Produced on an empty database, got {other:?}"),
@@ -149,10 +176,20 @@ async fn one_real_chapter_end_to_end() {
         .expect("chapter row should exist");
     eprintln!("--- title: {:?}", row.title);
     eprintln!("--- prompt_hash: {}", row.prompt_hash);
-    eprintln!("--- text_md ({} bytes):\n{}", row.text_md.len(), row.text_md);
+    eprintln!(
+        "--- text_md ({} bytes):\n{}",
+        row.text_md.len(),
+        row.text_md
+    );
 
-    assert!(!row.text_md.trim().is_empty(), "the chapter must have prose");
-    assert!(!row.title.trim().is_empty(), "the chapter must have a title");
+    assert!(
+        !row.text_md.trim().is_empty(),
+        "the chapter must have prose"
+    );
+    assert!(
+        !row.title.trim().is_empty(),
+        "the chapter must have a title"
+    );
     assert_eq!(
         row.prompt_hash,
         litrpg_core::content_hash(PREMISE),
@@ -211,7 +248,10 @@ async fn one_real_chapter_end_to_end() {
             .expect("known subjects")
             .into_iter()
             .collect();
-        match litrpg_engine::Generator::pass2(&diag, &row.text_md, &known).await {
+        // Same input the cycle used: tags stripped. Feeding the tagged markdown makes
+        // pass 2 treat `SYSTEM` as a character and propose `subject=SYSTEM`.
+        let plain = litrpg_engine::plain_chapter_text(&planned_from(&row.text_md));
+        match litrpg_engine::Generator::pass2(&diag, &plain, &known).await {
             Ok(e) => {
                 eprintln!("--- pass 2 proposed {} deltas:", e.deltas.len());
                 for d in &e.deltas {
@@ -258,7 +298,10 @@ async fn one_real_chapter_end_to_end() {
     );
 
     assert!(!segments.is_empty(), "audio implies segment rows");
-    assert_eq!(segments[0].start_ms, 0, "the first segment must start at zero");
+    assert_eq!(
+        segments[0].start_ms, 0,
+        "the first segment must start at zero"
+    );
     for w in segments.windows(2) {
         assert_eq!(
             w[0].end_ms, w[1].start_ms,
@@ -324,7 +367,10 @@ async fn one_real_chapter_end_to_end() {
         .map(|e| e.file_name().to_string_lossy().to_string())
         .filter(|n| n.contains(".part"))
         .collect();
-    assert!(leftovers.is_empty(), "temp files left behind: {leftovers:?}");
+    assert!(
+        leftovers.is_empty(),
+        "temp files left behind: {leftovers:?}"
+    );
 
     eprintln!(
         "\n=== a whole chapter exists: {} words of prose, {} segments, {:.1}s of audio, \
@@ -344,6 +390,7 @@ async fn one_real_chapter_end_to_end() {
 #[tokio::test]
 #[ignore = "costs a few seconds of Azure credit"]
 async fn azure_renders_one_segment() {
+    init_logging();
     use litrpg_core::SpeakerKind;
     use litrpg_engine::Renderer;
     use litrpg_tts::RenderRequest;
@@ -379,10 +426,18 @@ async fn azure_renders_one_segment() {
     }
 }
 
-/// Idempotence against the real world: a second cycle must not re-render chapter 1.
+/// A second cycle must never rewrite chapter 1's prose, whatever the audio did.
+///
+/// The load-bearing assertion is deliberately **independent of the render**: a chapter with
+/// `has_audio = false` does not count toward the rendered-ahead buffer, so at
+/// `buffer_target: 1` the engine is *right* to keep working rather than idle — an earlier
+/// version of this test asserted `Idle` unconditionally and failed on the engine being
+/// correct. What must hold either way is that prose which has already shipped is never
+/// regenerated; the `Idle` check applies only when the buffer genuinely filled.
 #[tokio::test]
 #[ignore = "costs GPU time on familiar and Azure credit"]
-async fn a_second_cycle_idles_rather_than_re_rendering() {
+async fn a_second_cycle_never_rewrites_published_prose() {
+    init_logging();
     let dir = tempfile::tempdir().expect("temp dir");
     let prompt_path = dir.path().join("prompt.md");
     std::fs::write(&prompt_path, PREMISE).expect("write premise");
@@ -422,12 +477,61 @@ async fn a_second_cycle_idles_rather_than_re_rendering() {
     let first = engine.run_cycle(0).await.expect("first cycle");
     assert_eq!(first.produced_chapter(), Some(1), "got {first:?}");
 
-    // buffer_target is 1 and chapter 1 now has audio, so there is nothing to do.
+    let after_first = engine.with_store(|s| s.chapter(1)).expect("chapter 1");
+    let first_had_audio = after_first.has_audio;
+    eprintln!("first cycle: has_audio={first_had_audio}");
+
     let second = engine.run_cycle(0).await.expect("second cycle");
+    eprintln!("second cycle: {second:?}");
+
+    // The assertion that matters, and it holds regardless of the audio path.
+    let after_second = engine.with_store(|s| s.chapter(1)).expect("chapter 1 again");
+    assert_eq!(
+        after_second.text_md, after_first.text_md,
+        "chapter 1's prose was rewritten -- published history must be immutable"
+    );
+    assert_eq!(
+        after_second.prompt_hash, after_first.prompt_hash,
+        "chapter 1's provenance changed"
+    );
+
     match second {
-        CycleOutcome::Idle { buffer_depth } => assert_eq!(buffer_depth, 1),
-        other => panic!("expected Idle, got {other:?} -- a re-render costs money twice"),
+        // Chapter 1 rendered, so the buffer is full at target 1.
+        CycleOutcome::Idle { buffer_depth } if first_had_audio => {
+            assert_eq!(buffer_depth, 1);
+        }
+        // Chapter 1 did not render, so it does not count toward the buffer and the engine
+        // is correct to carry on: either it re-renders chapter 1 or it writes chapter 2.
+        CycleOutcome::ResumedRender { chapter, .. } if !first_had_audio => {
+            assert_eq!(chapter, 1, "only the unrendered chapter may be resumed");
+        }
+        CycleOutcome::Produced { chapter, .. } if !first_had_audio => {
+            assert_eq!(chapter, 2, "a new chapter must be the next number");
+        }
+        other if first_had_audio => {
+            panic!("chapter 1 has audio, so the buffer is full; expected Idle, got {other:?}")
+        }
+        other => panic!("unexpected outcome with an unrendered chapter 1: {other:?}"),
     }
+}
+
+/// Rebuild planned segments from stored markdown, for diagnostics only.
+fn planned_from(text_md: &str) -> Vec<litrpg_engine::PlannedSegment> {
+    let body: String = text_md
+        .lines()
+        .skip_while(|l| l.trim_start().starts_with('#') || l.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    litrpg_ember::parse_tagged_prose(&body)
+        .into_iter()
+        .map(|s| litrpg_engine::PlannedSegment {
+            idx: s.idx,
+            speaker: s.speaker,
+            kind: s.kind,
+            voice_ref: String::new(),
+            text: s.text,
+        })
+        .collect()
 }
 
 fn ember_config() -> litrpg_config::Config {

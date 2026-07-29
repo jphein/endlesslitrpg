@@ -50,7 +50,7 @@ pub enum CliError {
         path: PathBuf,
     },
 
-    #[error("{path}: {source}")]
+    #[error("i/o error on {path}")]
     Io {
         path: PathBuf,
         #[source]

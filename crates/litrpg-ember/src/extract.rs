@@ -38,14 +38,31 @@ pub const EXTRACTION_SCHEMA_NAME: &str = "chapter_extraction";
 ///
 /// `value_num` / `value_txt` are nullable and *not* required: a text delta has no number
 /// and forcing an explicit `null` for both on every entry buys nothing.
+///
+/// # Generation order is alphabetical, not schema order
+///
+/// Measured on this build: the keys come back
+/// `deltas, new_lore, quest_updates, summary, title` — strict alphabetical order, regardless
+/// of the order they appear in here. So reordering `properties` to control what the model
+/// "thinks about first" does nothing; the grammar sorts them. Worth knowing before trying
+/// it: an earlier attempt to put `title` after `summary` for exactly that reason had no
+/// effect at all.
+///
+/// It happens to land favourably — `title` is alphabetically last, so it is written after
+/// the summary and the deltas — but that is luck, not design, and a field named `a_title`
+/// would be generated first.
 pub const EXTRACTION_SCHEMA: &str = r#"{
   "type": "object",
   "additionalProperties": false,
-  "required": ["summary", "deltas", "new_lore", "quest_updates"],
+  "required": ["summary", "title", "deltas", "new_lore", "quest_updates"],
   "properties": {
     "summary": {
       "type": "string",
-      "description": "Two or three sentences covering what happened, for use as long-range context in later chapters. Facts, not atmosphere."
+      "description": "Two or three sentences of what happened IN THE STORY, for use as long-range context in later chapters. Facts about events, people and places -- not atmosphere, and never a remark about what data was or was not present."
+    },
+    "title": {
+      "type": "string",
+      "description": "A short chapter title, at most eight words. Name what happens in the story. Never describe the extraction itself."
     },
     "deltas": {
       "type": "array",
@@ -116,6 +133,10 @@ pub fn response_format() -> Value {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Extraction {
+    /// Short, story-facing chapter title. Empty when an older payload omitted it; the
+    /// engine falls back to `Chapter N`.
+    #[serde(default)]
+    pub title: String,
     pub summary: String,
     #[serde(default)]
     pub deltas: Vec<ProposedDelta>,

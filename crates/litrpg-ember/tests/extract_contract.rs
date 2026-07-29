@@ -41,6 +41,60 @@ fn the_extraction_schema_is_valid_json() {
     assert_eq!(parsed["type"], "object");
 }
 
+/// Measured 2026-07-29: deriving a title from the *summary* produced
+/// `"No stat changes, inventory changes, or location changes are…"` as a user-facing
+/// chapter title, because a summary is written for a bookkeeping audience. A title is
+/// content, so the model that just read the chapter writes it.
+#[test]
+fn the_schema_asks_for_a_story_facing_title() {
+    let s: Value = serde_json::from_str(EXTRACTION_SCHEMA).unwrap();
+    let required: Vec<&str> = s["required"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(required.contains(&"title"), "title must be required");
+
+    let desc = s["properties"]["title"]["description"].as_str().unwrap();
+    assert!(
+        desc.contains("story"),
+        "the title must be told to name the story: {desc}"
+    );
+
+    // And the summary must be told to describe events, not the extraction.
+    let sum = s["properties"]["summary"]["description"].as_str().unwrap();
+    assert!(
+        sum.contains("IN THE STORY"),
+        "the summary must be told to cover story events: {sum}"
+    );
+}
+
+#[test]
+fn a_payload_without_a_title_still_parses_and_leaves_it_empty() {
+    // Robustness: an older or truncated payload must not cost the whole extraction, and
+    // the engine falls back to `Chapter N`.
+    let payload = json!({
+        "summary": "s", "deltas": [], "new_lore": [], "quest_updates": []
+    })
+    .to_string();
+    let e = parse_extraction(&payload).expect("title is optional on the way in");
+    assert!(e.title.is_empty());
+}
+
+#[test]
+fn the_title_is_deserialized_when_present() {
+    let payload = json!({
+        "title": "The First Seal Breaks",
+        "summary": "s", "deltas": [], "new_lore": [], "quest_updates": []
+    })
+    .to_string();
+    assert_eq!(
+        parse_extraction(&payload).unwrap().title,
+        "The First Seal Breaks"
+    );
+}
+
 #[test]
 fn the_schema_requires_all_four_top_level_keys() {
     let s: Value = serde_json::from_str(EXTRACTION_SCHEMA).unwrap();

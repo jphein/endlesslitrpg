@@ -58,12 +58,24 @@ pub struct ParsedSegment {
     pub text: String,
 }
 
+/// Spellings that mean "the narrating voice".
+///
+/// `narration` is here because the live model uses it: asked for `[narrator]`, Ember
+/// emitted `[narration]` for most of a measured chapter and `[narrator]` for the opening
+/// paragraph. Treating it as a character mints a cast row and draws a *character* voice, so
+/// one chapter's narration gets read by two different people — a defect that is only
+/// audible, and would therefore ship.
+pub const NARRATOR_ALIASES: &[&str] = &["narrator", "narration"];
+
+/// Spellings that mean the RPG readout voice.
+pub const SYSTEM_ALIASES: &[&str] = &["system"];
+
 /// Which voice family a speaker name belongs to. Case-insensitive.
 pub fn classify_speaker(name: &str) -> SpeakerKind {
     let n = name.trim();
-    if n.eq_ignore_ascii_case("system") {
+    if SYSTEM_ALIASES.iter().any(|a| n.eq_ignore_ascii_case(a)) {
         SpeakerKind::System
-    } else if n.eq_ignore_ascii_case("narrator") {
+    } else if NARRATOR_ALIASES.iter().any(|a| n.eq_ignore_ascii_case(a)) {
         SpeakerKind::Narrator
     } else {
         SpeakerKind::Character

@@ -252,6 +252,12 @@ explicit tag.
 blank line, repeat the tag — an untagged paragraph after a blank line is read as narration.
 - No markdown headings, no chapter number, no title, no commentary about the task, no \
 author's note.
+- Every chapter must contain at least one [SYSTEM] block carrying concrete numbers — \
+experience gained, hit points lost, gold or loot received, a level-up, or a quest \
+advancing. This is a LitRPG: without it the chapter has no RPG layer and the story's \
+recorded state can never advance.
+- Use only these stat names in a [SYSTEM] block: hp, max_hp, level, xp, gold, plus named \
+inventory items. Do not invent stats such as mana or stamina — they are discarded.
 - Numbers are the engine's job, not yours: state changes in prose or in a [SYSTEM] block, \
 but never contradict the state you were given.";
 
@@ -356,7 +362,12 @@ pub fn pass2_messages(chapter_text: &str, known_subjects: &[String]) -> Vec<Mess
          numeric only.\n\n\
          Report a delta only for a change the chapter actually states. A field outside \
          this list, or a subject that is not a real character, is rejected by the engine \
-         and the change is lost — so do not invent either.",
+         and the change is lost — so do not invent either.\n\n\
+         `narrator` and `SYSTEM` are voices, not people. Never use either as a subject; \
+         attribute a stat block's numbers to the character they describe.\n\n\
+         Also give the chapter a `title`: at most eight words naming the key event, in the \
+         story's own register. It is shown to readers as the chapter name, so do not write \
+         the word \"Chapter\", a number, a placeholder, or any square brackets.",
         chapter = chapter_text.trim(),
         subjects = subjects,
         numeric = NUMERIC_FIELDS.join(", "),

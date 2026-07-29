@@ -118,6 +118,39 @@ fn narrator_tag_is_case_insensitive_and_canonicalized() {
     }
 }
 
+/// Measured against the live model 2026-07-29: asked for `[narrator]`, Ember emitted
+/// `[narration]` for most of the chapter and `[narrator]` for the opening paragraph. Without
+/// this alias, `narration` is classified as a **Character**, mints a cast row, and draws a
+/// character voice — so the same chapter's narration is read by two different people, one of
+/// whom sounds like a cast member. Only audible, so it would ship.
+#[test]
+fn narration_is_an_alias_for_narrator() {
+    for tag in ["[narration]", "[Narration]", "[NARRATION]"] {
+        let segs = parse_tagged_prose(&format!("{tag} Ash fell like slow snow."));
+        assert_eq!(
+            shape(&segs),
+            vec![(
+                "narrator",
+                SpeakerKind::Narrator,
+                "Ash fell like slow snow."
+            )],
+            "tag {tag} must canonicalize to the narrator, not mint a character"
+        );
+    }
+}
+
+#[test]
+fn narrator_and_narration_merge_into_one_speaker() {
+    let raw = "[narrator] The vale was quiet.\n[narration] Nothing moved.";
+    let segs = parse_tagged_prose(raw);
+    assert_eq!(
+        segs.len(),
+        1,
+        "the two spellings are one speaker and must merge: {segs:?}"
+    );
+    assert_eq!(segs[0].speaker, "narrator");
+}
+
 #[test]
 fn anything_else_is_a_character() {
     let segs = parse_tagged_prose("[Sera Vane] \"Hold the line.\"");

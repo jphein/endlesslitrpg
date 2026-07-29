@@ -411,6 +411,7 @@ pub fn lore_row(name: &str, kind: &str, keywords: &str) -> ProposedLore {
 
 pub fn extraction_with(deltas: Vec<ProposedDelta>, new_lore: Vec<ProposedLore>) -> Extraction {
     Extraction {
+        title: "The First Seal".to_string(),
         summary: "Kaelen broke the first seal.".to_string(),
         deltas,
         new_lore,

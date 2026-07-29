@@ -224,6 +224,70 @@ async fn a_speaking_character_becomes_a_known_subject_via_the_cast() {
     assert_eq!(e.snapshot_num("Kaelen", "xp"), Some(150));
 }
 
+#[tokio::test]
+async fn a_delta_addressed_to_a_voice_is_refused_not_applied() {
+    // Measured live: pass 2 attributed a whole [SYSTEM] stat block to `subject: "SYSTEM"`.
+    // The store's gate *accepts* that, because `SYSTEM` is a cast row and therefore a known
+    // subject -- so Kaelen's inventory would accrue to a pseudo-person while his own
+    // character screen stayed empty.
+    let extraction = extraction_with(
+        vec![
+            delta("SYSTEM", "inv:Ledger of Debts", "set", Some(1)),
+            delta("narrator", "gold", "add", Some(10)),
+            delta("Kaelen", "xp", "add", Some(500)),
+        ],
+        vec![],
+    );
+    let e = engine(
+        FakeGenerator::new().with_extraction(extraction),
+        FakeRenderer::new(),
+        FakeLibrary::new(),
+        FakeArtifacts::new(),
+    );
+
+    match e.run_cycle(0).await.unwrap() {
+        CycleOutcome::Produced {
+            applied, rejected, ..
+        } => {
+            assert_eq!(applied, 1, "only Kaelen's delta is legitimate");
+            assert_eq!(rejected, 2, "both voice-addressed deltas must be counted");
+        }
+        other => panic!("expected Produced, got {other:?}"),
+    }
+
+    assert_eq!(e.snapshot_num("Kaelen", "xp"), Some(500));
+    assert_eq!(
+        e.snapshot_num("SYSTEM", "inv:Ledger of Debts"),
+        None,
+        "a voice must hold no state"
+    );
+    assert_eq!(e.snapshot_num("narrator", "gold"), None);
+}
+
+#[tokio::test]
+async fn pass_2_is_not_offered_the_voices_as_known_subjects() {
+    let e = engine(
+        FakeGenerator::new(),
+        FakeRenderer::new(),
+        FakeLibrary::new(),
+        FakeArtifacts::new(),
+    );
+    e.run_cycle(0).await.unwrap();
+
+    let calls = e.generator().pass2_calls.lock().unwrap();
+    let (_, known) = calls.first().expect("pass 2 was called");
+    assert!(
+        known.iter().any(|s| s == "Kaelen"),
+        "real characters must be offered: {known:?}"
+    );
+    for voice in ["narrator", "SYSTEM"] {
+        assert!(
+            !known.iter().any(|s| s == voice),
+            "{voice} is a voice, not a person, and must not be offered as a subject: {known:?}"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Step 7 — a rejection is recorded, never fatal
 // ---------------------------------------------------------------------------

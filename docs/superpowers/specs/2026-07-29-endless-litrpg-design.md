@@ -151,11 +151,25 @@ Verdict: **GO**, CPU-only, GPUs verified untouched before and after.
   24–27 Br-M, 28–52 other languages.
 - Steady-state disk: ~533 MB (models + venv), at `/home/jp/tts-spike/models/`.
 
-**Assumption A1 — `cori`.** D7 names Piper `cori`, a single-speaker en_GB model distinct from
-`libritts_r`'s 904 sids. Sourcing and benchmarking is in flight. If it cannot be obtained as a
-sherpa-loadable VITS model, the narrator default falls back to Kokoro `bf_emma` (21) or `bm_george`
-(26), preserving the en-GB signature. **Nothing else in this design changes** — voices are config,
-not code.
+**A1 — `cori` — RESOLVED 2026-07-29.** Available directly from the sherpa-onnx `tts-models` bucket;
+no HuggingFace fallback and no substitution needed. `vits-piper-en_GB-cori-medium` (67 MB) and
+`-high` (116 MB) both return HTTP 200; `-low` does not exist. Preferred over the raw upstream Piper
+voice because the sherpa tarball bundles `tokens.txt` and `espeak-ng-data`, so it drops into the
+existing VITS config with no assembly.
+
+| | |
+|---|---|
+| Language / voice | **en_GB — UK English female** |
+| Speakers | **1** (`sid 0` only) |
+| Native rate | **22,050 Hz** (both variants) |
+| Dataset | LibriVox, ~24 h, public domain — audiobook provenance |
+| RTF @ 8 threads | medium **25.0×** · **high 7.55×** |
+
+**Narrator default is `cori-high`.** At 7.55× it is *faster than Kokoro* (5.28×), so the largest
+share of any chapter can use the better variant without becoming the bottleneck: ~103 s for a
+13-minute narration, against a 3-minute budget.
+
+Voices remain **config, not code**, so recasting the narrator needs no code change.
 
 **Why en-GB matters:** `agent-orchestration.md:144` reserves en-GB as Ember's accent signature, the
 one JP classifies by before parsing content. A British narrator keeps that rule true while the local
@@ -340,8 +354,10 @@ rate-mismatch minefield. One rate at the boundary makes concatenation `Vec::exte
 It lets each plugin play to its strength without leaking into the engine:
 
 - **Azure** overrides it to emit **one multi-voice SSML request** for the whole chapter (§4.2).
-- **sherpa** overrides it to **fan out across a process pool, sharded by model** — 4 threads per
-  worker, one model per worker (cori and Kokoro are different models).
+- **sherpa** overrides it to **fan out across a process pool at 4 threads per worker**, sharded by
+  **work unit (segment)** — *not* by model. Measured: one process holds cori and Kokoro
+  simultaneously with **zero reload penalty**, so routing segments by model would add complexity for
+  nothing.
 
 The engine calls `render_batch` and does not know which happened.
 
@@ -382,10 +398,39 @@ Cost is negligible. It is a distinct pipeline stage, not a voice.
 
 ### 7.5 Resampling
 
-sherpa models emit 22.05 kHz (Piper) / 24 kHz (Kokoro); Azure emits 16 kHz natively. The sherpa
-plugin resamples internally to satisfy §7.1. **This must be in the design or the watch gets
-chipmunks.** Reverie is verifying the exact ffmpeg invocation, the per-join click behaviour, and that
-output size equals `32000 × seconds` exactly.
+sherpa models emit 22.05 kHz (cori and Piper) / 24 kHz (Kokoro); Azure emits 16 kHz natively. The
+sherpa plugin resamples internally to satisfy §7.1. **This must be in the design or the watch gets
+chipmunks.** Verified invocation — headerless, since `-f s16le` writes a bare sample stream with no
+44-byte WAV header:
+
+```bash
+ffmpeg -y -i INPUT.wav -af "loudnorm=I=-20:TP=-2:LRA=7" \
+  -ar 16000 -ac 1 -f s16le -acodec pcm_s16le OUTPUT.pcm
+```
+
+Byte-exact against the 32,000 B/s contract, and ~850× realtime — resampling is never a bottleneck.
+The SYSTEM colouring chain (§7.4) composes into the *same* single ffmpeg pass; no intermediate file.
+
+**`loudnorm` is not optional.** The backends land 4.1 LU apart — cori −25.1 LUFS, Kokoro −24.2,
+Kokoro+SYSTEM FX −21.0 (the `acompressor` drives that one hot) — which is plainly audible as a level
+jump where segments abut. One stage brings the spread to **0.7 LU**, below the ~1 LU just-noticeable
+difference, with the whole chapter at −20.0 LUFS: inside the ACX audiobook window. This was the real
+integration hazard, not the resample.
+
+**Consequence that must not be missed: `loudnorm` has filter delay and changes stream length
+slightly** (a measured segment came out 104 bytes shorter). Therefore:
+
+1. Byte offsets and durations are **measured from the final, fully-processed PCM** — never predicted
+   beforehand.
+2. Every segment's final PCM is **zero-padded up to a 32-byte (whole-millisecond) boundary**. At most
+   30 bytes, under 1 ms, inaudible — and it keeps `duration_ms × 32 == len` exactly true, which is
+   the invariant the watch's Range requests and sentence highlighting rest on. Without this, an
+   arbitrary even byte count silently breaks the manifest's arithmetic.
+
+**Joins need no silence padding.** Measured join deltas were 6 and 1 against a p99.9 signal delta of
+~3,595 — three orders of magnitude below normal movement, because sherpa output already begins and
+ends at ~zero amplitude. Inter-segment silence remains available as a **narrative pacing** control
+(a beat before a SYSTEM alert), defaulting to zero. It is a creative dial, not artifact suppression.
 
 ### 7.6 Secrets
 
@@ -429,7 +474,12 @@ window `.pcm` is pruned and regenerated on demand from `.mp3` if an older chapte
 ```
 
 Byte offsets are derivable (`ms × 32`) but **precomputed on purpose**: the watch then does zero
-arithmetic and can issue a `Range` request straight from the manifest. Constant bitrate is why this
+arithmetic and can issue a `Range` request straight from the manifest.
+
+They are computed from the **final rendered PCM**, after resampling, SYSTEM colouring and
+`loudnorm` — never from predicted durations, because `loudnorm` alters stream length (§7.5). Each
+segment is zero-padded to a 32-byte boundary first, so `end_ms × 32 == end_byte` holds exactly
+rather than approximately. Constant bitrate is why this
 works at all — compressed audio would need a frame table to answer "where does segment 40 start".
 
 One manifest type in `litrpg-core`, **three consumers**: daemon, Candela highlighting, watch
@@ -592,7 +642,10 @@ CLAUDE.md's rule applies: this project has tests, so they run after every change
    register in `status.realm.watch/checks.json`. Should this become e.g. `story.realm.watch`, or stay
    `endlesslitrpg` like `candela`, `smol`, and `tonemask`? Registration in `checks.json` should happen
    either way once `/api/version` exists.
-2. **Assumption A1** — `cori` sourcing (§4.4), in flight with Reverie.
+2. ~~**Assumption A1** — `cori` sourcing~~ — **resolved 2026-07-29** (§4.4). One thing worth a
+   conscious decision rather than a default: **`cori` is UK English *female***. If a male narrator
+   was intended, Kokoro `bm_george` (26) or `bm_lewis` (27) keep the en-GB signature. Config change,
+   not a code change.
 3. **Static DHCP lease** for `familiar` at `10.0.6.107` — needs confirming on gatekeeper; the watch has
    no DNS.
 4. **`cargo` on familiar** — install via rustup or mise when implementation starts.

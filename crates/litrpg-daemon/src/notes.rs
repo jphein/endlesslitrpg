@@ -1,36 +1,16 @@
 //! `POST /api/notes` — director notes from the CLI, the watch's push-to-talk, or
 //! Candela.
 //!
-//! # BLOCKED on a `litrpg-store` accessor
-//!
-//! The schema has the table (`notes(id, body, source, created_at, consumed_chapter)`
-//! in `001_initial.sql`) but `litrpg-store` exposes **no** method to write it, and
-//! `Store::conn` is `pub(crate)` — so from this crate the table is unreachable.
-//!
-//! Needed, and deliberately *not* added here because `litrpg-store` is owned by
-//! another agent:
-//!
-//! ```ignore
-//! impl Store {
-//!     pub fn insert_note(&self, body: &str, source: &str) -> Result<i64>;
-//!     pub fn pending_notes(&self) -> Result<Vec<NoteRow>>;   // consumed_chapter IS NULL
-//! }
-//! ```
-//!
-//! Until then this route validates the payload fully and returns **501 Not
-//! Implemented**. Two rejected alternatives, both worse:
-//!
-//! * Returning `202 Accepted` and dropping the note. A director note that vanishes
-//!   silently is the single worst outcome here — the user believes the story was
-//!   steered and it was not.
-//! * Opening a second `rusqlite::Connection` to the same file from this crate. That
-//!   would bypass the single-writer mutex in `AppState` and reintroduce exactly the
-//!   `next_seq()` race the mutex exists to make structural.
+//! Previously a documented `501`: the `notes` table existed in the schema but
+//! `litrpg-store` exposed no way to write it. `Store::insert_note` now exists, so the
+//! route persists for real and returns `201 Created` with the row id.
 
 use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::State;
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
@@ -78,17 +58,24 @@ pub fn validate_note(req: &NoteRequest) -> ApiResult<()> {
     Ok(())
 }
 
+/// Returns `201 Created`. The body is stored **trimmed**, and the response echoes what
+/// was actually persisted rather than what was sent, so a client never has to guess
+/// whether its whitespace survived.
 pub async fn post_note(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Json(req): Json<NoteRequest>,
-) -> ApiResult<Json<NoteAccepted>> {
+) -> ApiResult<impl IntoResponse> {
     validate_note(&req)?;
 
-    // TODO(litrpg-store): replace with
-    //   let id = state.store.lock().await.insert_note(req.body.trim(), &req.source)?;
-    //   Ok(Json(NoteAccepted { id, body: req.body, source: req.source }))
-    Err(ApiError::NotImplemented(
-        "director notes need Store::insert_note; the notes table has no accessor in litrpg-store"
-            .into(),
+    let body = req.body.trim().to_string();
+    let id = state.store.lock().await.insert_note(&body, &req.source)?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(NoteAccepted {
+            id,
+            body,
+            source: req.source,
+        }),
     ))
 }

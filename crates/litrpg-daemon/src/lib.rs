@@ -13,12 +13,15 @@ pub mod notes;
 pub mod range;
 pub mod state;
 pub mod version;
+pub mod voices;
 
 use std::sync::Arc;
 
 use axum::Router;
 use axum::routing::{get, post};
 use litrpg_store::Store;
+use litrpg_tts::TtsRegistry;
+use litrpg_tts::sherpa::SherpaConfig;
 use tokio::sync::Mutex;
 
 pub use config::{Config, StoryConfig};
@@ -55,14 +58,40 @@ pub use error::{ApiError, ApiResult};
 pub struct AppState {
     pub store: Arc<Mutex<Store>>,
     pub config: Config,
+    /// Registered TTS plugins. Read-only after startup, and `TtsRegistry` is `Sync`,
+    /// so unlike the store it needs no lock.
+    pub tts: TtsRegistry,
+    /// Always-compiled sherpa cast table. Held separately from `tts` because with the
+    /// default feature set there is no `SherpaBackend` to register, yet
+    /// `/api/voices` must still advertise the catalog — see `voices.rs`.
+    pub sherpa: SherpaConfig,
 }
 
 impl AppState {
+    /// An empty TTS registry and the default sherpa cast table.
+    ///
+    /// Empty by design: registering Azure would read credentials from the environment,
+    /// which would make tests depend on the developer's machine. `main` registers real
+    /// backends via [`AppState::with_tts`].
     pub fn new(store: Store, config: Config) -> Self {
         Self {
             store: Arc::new(Mutex::new(store)),
             config,
+            tts: TtsRegistry::new(),
+            sherpa: SherpaConfig::default(),
         }
+    }
+
+    #[must_use]
+    pub fn with_tts(mut self, tts: TtsRegistry) -> Self {
+        self.tts = tts;
+        self
+    }
+
+    #[must_use]
+    pub fn with_sherpa(mut self, sherpa: SherpaConfig) -> Self {
+        self.sherpa = sherpa;
+        self
     }
 }
 
@@ -80,15 +109,17 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/chapters", get(chapters::list_chapters))
         .route("/api/chapters/{n}", get(chapters::get_chapter))
         .route("/api/state", get(state::get_state))
+        // Two routes rather than an optional path parameter. `/api/character` with no
+        // segment resolves to the protagonist, which keeps both URLs unambiguous and
+        // cacheable — an `Option<Path<String>>` would make one URL mean two things and
+        // leaves `/api/character/` (trailing slash, empty subject) ill-defined.
+        .route("/api/character", get(state::get_protagonist))
         .route("/api/character/{subject}", get(state::get_character))
+        .route("/api/voices", get(voices::get_voices))
         .route("/api/notes", post(notes::post_note))
         // One handler for both extensions; it parses `NNNN.pcm` / `NNNN.mp3` itself,
         // which is also where path traversal is rejected (see `media::parse_media_name`).
         .route("/media/{name}", get(media::serve_media))
         .route("/feed.xml", get(feed::get_feed))
-        // TODO(litrpg-tts): `GET /api/voices` — the aggregated voice inventory that
-        // drives cast selection (spec §9.1). Needs the `litrpg-tts` crate's backend
-        // registry to enumerate sherpa + Azure voices; that crate is still being built,
-        // so the route is intentionally absent rather than stubbed with a wrong shape.
         .with_state(state)
 }

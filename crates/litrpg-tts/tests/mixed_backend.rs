@@ -60,12 +60,36 @@ impl TtsBackend for FakeAzure {
 
 fn chapter() -> Vec<RenderRequest> {
     let rows: &[(&str, &str, SpeakerKind)] = &[
-        ("sherpa:piper-en_GB-cori:0", "The vale smelled of iron and wet ash.", SpeakerKind::Narrator),
-        ("sherpa:kokoro-multi-lang-v1_0:18", "\"We don't have long,\" Kael said.", SpeakerKind::Character),
-        ("azure:en-GB-Ada:DragonHDLatestNeural", "A guest voice answered from the dark.", SpeakerKind::Character),
-        ("sherpa:kokoro-multi-lang-v1_0:26", "You have gained a level.", SpeakerKind::System),
-        ("azure:en-US-Ava:DragonHDLatestNeural", "And then the ward broke.", SpeakerKind::Character),
-        ("sherpa:piper-en_GB-cori:0", "Nothing moved for a long moment.", SpeakerKind::Narrator),
+        (
+            "sherpa:piper-en_GB-cori:0",
+            "The vale smelled of iron and wet ash.",
+            SpeakerKind::Narrator,
+        ),
+        (
+            "sherpa:kokoro-multi-lang-v1_0:18",
+            "\"We don't have long,\" Kael said.",
+            SpeakerKind::Character,
+        ),
+        (
+            "azure:en-GB-Ada:DragonHDLatestNeural",
+            "A guest voice answered from the dark.",
+            SpeakerKind::Character,
+        ),
+        (
+            "sherpa:kokoro-multi-lang-v1_0:26",
+            "You have gained a level.",
+            SpeakerKind::System,
+        ),
+        (
+            "azure:en-US-Ava:DragonHDLatestNeural",
+            "And then the ward broke.",
+            SpeakerKind::Character,
+        ),
+        (
+            "sherpa:piper-en_GB-cori:0",
+            "Nothing moved for a long moment.",
+            SpeakerKind::Narrator,
+        ),
     ];
     rows.iter()
         .enumerate()
@@ -144,7 +168,10 @@ async fn manifest_byte_offsets_address_the_joined_mixed_stream_exactly() {
     let joined = Pcm16k::concat(&parts);
 
     assert_eq!(manifest.sample_rate, SAMPLE_RATE_HZ);
-    assert!(manifest.is_contiguous(), "no gaps between mixed-backend segments");
+    assert!(
+        manifest.is_contiguous(),
+        "no gaps between mixed-backend segments"
+    );
     assert_eq!(
         manifest.total_bytes(),
         joined.len() as u64,
@@ -157,8 +184,69 @@ async fn manifest_byte_offsets_address_the_joined_mixed_stream_exactly() {
         let slice = &joined.as_bytes()[seg.start_byte() as usize..seg.end_byte() as usize];
         assert_eq!(slice.len(), pcm.len(), "segment {} length", seg.idx);
         assert_eq!(slice, pcm.as_bytes(), "segment {} content", seg.idx);
-        let tag = if seg.voice_ref.starts_with("sherpa:") { 0x11 } else { 0x22 };
-        assert_eq!(slice[0], tag, "segment {} came from the wrong backend", seg.idx);
+        let tag = if seg.voice_ref.starts_with("sherpa:") {
+            0x11
+        } else {
+            0x22
+        };
+        assert_eq!(
+            slice[0], tag,
+            "segment {} came from the wrong backend",
+            seg.idx
+        );
+    }
+}
+
+#[tokio::test]
+async fn assemble_builds_a_mixed_backend_manifest_that_agrees_with_hand_arithmetic() {
+    use litrpg_tts::{DEFAULT_GAP_MS, assemble};
+
+    let reqs = chapter();
+    let parts = registry().render_all(&reqs).await.unwrap();
+    let a = assemble(&parts, DEFAULT_GAP_MS);
+
+    let segments: Vec<Segment> = reqs
+        .iter()
+        .zip(&a.spans)
+        .map(|(r, s)| Segment {
+            idx: r.idx,
+            speaker: format!("s{}", r.idx),
+            kind: r.kind,
+            voice_ref: r.voice.to_string(),
+            text: r.text.clone(),
+            start_ms: s.start_ms,
+            end_ms: s.end_ms,
+        })
+        .collect();
+    let manifest = Manifest::new(1, segments);
+
+    assert!(manifest.is_contiguous());
+    assert_eq!(manifest.total_bytes(), a.pcm.len() as u64);
+    assert_eq!(a.pcm.len() as u32, a.pcm.duration_ms() * BYTES_PER_MS);
+
+    // Byte offsets from the manifest and from the spans must be the same numbers.
+    for (seg, span) in manifest.segments.iter().zip(&a.spans) {
+        assert_eq!(seg.start_byte(), span.start_byte());
+        assert_eq!(seg.end_byte(), span.end_byte());
+        let slice = &a.pcm.as_bytes()[seg.start_byte() as usize..seg.end_byte() as usize];
+        let tag = if seg.voice_ref.starts_with("sherpa:") {
+            0x11
+        } else {
+            0x22
+        };
+        assert_eq!(
+            slice[0], tag,
+            "segment {} came from the wrong backend",
+            seg.idx
+        );
+    }
+
+    // And the watch can look up any millisecond without falling in a hole.
+    for ms in [0, 1, a.pcm.duration_ms() / 2, a.pcm.duration_ms() - 1] {
+        assert!(
+            manifest.segment_at_ms(ms).is_some(),
+            "no segment at {ms} ms"
+        );
     }
 }
 

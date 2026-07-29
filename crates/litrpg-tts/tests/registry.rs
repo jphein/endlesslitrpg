@@ -264,9 +264,7 @@ async fn an_overriding_backend_gets_one_batch_call_not_n_renders() {
         batch_calls: counter.clone(),
     }));
 
-    let reqs: Vec<RenderRequest> = (0..5)
-        .map(|i| req(i, "batching:v", "hello"))
-        .collect();
+    let reqs: Vec<RenderRequest> = (0..5).map(|i| req(i, "batching:v", "hello")).collect();
     let out = reg.render_all(&reqs).await.unwrap();
 
     assert_eq!(out.len(), 5);
@@ -319,7 +317,10 @@ async fn render_all_of_nothing_is_nothing() {
 #[tokio::test]
 async fn render_joined_defaults_to_concatenating_the_batch() {
     let mock = Mock::ready("sherpa", 10);
-    let reqs = vec![req(0, "sherpa:cori:0", "ab"), req(1, "sherpa:cori:0", "abc")];
+    let reqs = vec![
+        req(0, "sherpa:cori:0", "ab"),
+        req(1, "sherpa:cori:0", "abc"),
+    ];
     let joined = mock.render_joined(&reqs).await.unwrap();
     assert_eq!(joined.duration_ms(), 50);
     assert_eq!(joined.len(), 50 * 32);

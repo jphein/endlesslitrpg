@@ -81,6 +81,43 @@ async fn model_generated_titles_are_xml_escaped() {
     assert!(!xml.contains("Iron & Ash"));
 }
 
+/// `pubDate` must come from `chapters.created_at`, not the MP3's mtime.
+///
+/// The fixture writes the MP3 *after* inserting the chapter, and re-rendering for a
+/// cast change would touch it again — so an mtime-derived date would republish an old
+/// chapter to the top of every subscriber's feed. Asserting the year comes from
+/// `created_at` (set by the store at insert time, in Unix **ms**) pins the source.
+#[tokio::test]
+async fn pubdate_comes_from_created_at_not_file_mtime() {
+    let f = fixture();
+    let xml = body_string(f.get("/feed.xml").await).await;
+
+    let start = xml.find("<pubDate>").expect("pubDate") + "<pubDate>".len();
+    let end = xml[start..].find("</pubDate>").unwrap() + start;
+    let pub_date = &xml[start..end];
+
+    // RFC 822: "Wed, 29 Jul 2026 00:12:13 GMT" —
+    // ["Wed,", "29", "Jul", "2026", "00:12:13", "GMT"], six fields.
+    let parts: Vec<&str> = pub_date.split_whitespace().collect();
+    assert_eq!(parts.len(), 6, "malformed pubDate {pub_date:?}");
+    assert!(parts[0].ends_with(','), "weekday must be comma-terminated");
+    assert_eq!(parts[5], "GMT");
+    assert_eq!(
+        parts[4].split(':').count(),
+        3,
+        "time must be hh:mm:ss, got {:?}",
+        parts[4]
+    );
+
+    // A ms value mistakenly treated as seconds lands ~50,000 years in the future, so a
+    // sane year is a real regression guard on the /1000 conversion.
+    let year: i64 = parts[3].parse().expect("year");
+    assert!(
+        (2024..=2100).contains(&year),
+        "pubDate year {year} implies created_at was misinterpreted (ms vs s)"
+    );
+}
+
 #[tokio::test]
 async fn item_has_guid_pubdate_and_duration() {
     let f = fixture();

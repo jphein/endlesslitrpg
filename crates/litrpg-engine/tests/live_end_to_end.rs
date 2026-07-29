@@ -25,14 +25,17 @@ use litrpg_engine::{
     CycleOutcome, EmberGenerator, Engine, EngineConfig, FsArtifacts, RegistryRenderer, StoreLibrary,
 };
 use litrpg_store::{NewStory, Store};
-use litrpg_tts::{TtsRegistry, azure::AzureBackend};
+use litrpg_tts::{TtsBackend, TtsRegistry, azure::AzureBackend};
 
 /// A small all-Azure cast. The Kokoro pool cannot be used here: a `voice_ref` names its
 /// backend (§7.3), so a sherpa ref against an Azure-only registry fails at render time.
 const AZURE_NARRATOR: &str = "azure:en-GB-Ada:DragonHDLatestNeural";
 const AZURE_SYSTEM: &str = "azure:en-US-Steffan:DragonHDLatestNeural";
+/// `en-GB-OllieMultilingual:DragonHDLatestNeural` is deliberately **absent**: it is in
+/// `litrpg-tts`'s curated `AZURE_VOICES` list but Azure answers **HTTP 400** for it
+/// (verified by `azure_renders_one_segment`). Because `render_all` fails the whole batch,
+/// one bad voice costs the entire chapter's audio — so it must not be in a pool.
 const AZURE_CHARACTERS: &[&str] = &[
-    "azure:en-GB-OllieMultilingual:DragonHDLatestNeural",
     "azure:en-US-Emma:DragonHDLatestNeural",
     "azure:en-US-Andrew:DragonHDLatestNeural",
     "azure:en-US-Ava:DragonHDLatestNeural",
@@ -198,6 +201,34 @@ async fn one_real_chapter_end_to_end() {
         .expect("summaries");
     eprintln!("--- summary: {:?}", summaries.first().map(|s| &s.body_md));
 
+    // Re-run pass 2 on the published prose purely to *see* what it proposes. Rejections
+    // surface from the cycle only as a count, and "2 rejected as UnknownField" is not
+    // enough to fix a prompt. Ember-only, so this costs no Azure credit.
+    {
+        let diag = EmberGenerator::from_config(&ember_config()).expect("ember");
+        let known: Vec<String> = engine
+            .with_store(|s| s.known_subjects())
+            .expect("known subjects")
+            .into_iter()
+            .collect();
+        match litrpg_engine::Generator::pass2(&diag, &row.text_md, &known).await {
+            Ok(e) => {
+                eprintln!("--- pass 2 proposed {} deltas:", e.deltas.len());
+                for d in &e.deltas {
+                    eprintln!(
+                        "      subject={:<12} field={:<18} op={:<4} num={:?} txt={:?}",
+                        d.subject, d.field, d.op, d.value_num, d.value_txt
+                    );
+                }
+                eprintln!("--- pass 2 proposed {} lore rows:", e.new_lore.len());
+                for l in &e.new_lore {
+                    eprintln!("      {} ({}) keywords={:?}", l.name, l.kind, l.keywords);
+                }
+            }
+            Err(e) => eprintln!("--- diagnostic pass 2 failed: {e}"),
+        }
+    }
+
     if state_dirty {
         eprintln!(
             "!!! pass 2 failed -- the chapter shipped state_dirty, which is the documented \
@@ -305,6 +336,49 @@ async fn one_real_chapter_end_to_end() {
     );
 }
 
+/// Cheap isolation of the TTS leg: one short segment, no Ember, no GPU.
+///
+/// Exists because a render failure inside the cycle is deliberately swallowed (§10: the
+/// text still ships), so `has_audio = false` tells you *that* it failed and nothing about
+/// *why*. This prints the actual error.
+#[tokio::test]
+#[ignore = "costs a few seconds of Azure credit"]
+async fn azure_renders_one_segment() {
+    use litrpg_core::SpeakerKind;
+    use litrpg_engine::Renderer;
+    use litrpg_tts::RenderRequest;
+
+    let azure = AzureBackend::from_default_config().expect("azure credentials");
+    eprintln!("azure endpoint: {}", azure.config().endpoint());
+    // Fully qualified: `AzureBackend` has a private `voices` field that shadows the
+    // trait method in ordinary method-call position.
+    eprintln!("azure voices: {}", TtsBackend::voices(&azure).len());
+
+    let renderer = RegistryRenderer::new(TtsRegistry::new().with(Box::new(azure)));
+
+    for voice in std::iter::once(AZURE_NARRATOR)
+        .chain(std::iter::once(AZURE_SYSTEM))
+        .chain(AZURE_CHARACTERS.iter().copied())
+    {
+        let req = RenderRequest::parse(
+            0,
+            voice,
+            "The vale smelled of iron and wet ash.",
+            SpeakerKind::Narrator,
+        )
+        .expect("voice_ref should parse");
+
+        match renderer.render_all(std::slice::from_ref(&req)).await {
+            Ok(parts) => eprintln!(
+                "  OK   {voice} -> {} bytes ({} ms)",
+                parts[0].len(),
+                parts[0].duration_ms()
+            ),
+            Err(e) => eprintln!("  FAIL {voice} -> {e}"),
+        }
+    }
+}
+
 /// Idempotence against the real world: a second cycle must not re-render chapter 1.
 #[tokio::test]
 #[ignore = "costs GPU time on familiar and Azure credit"]
@@ -357,8 +431,9 @@ async fn a_second_cycle_idles_rather_than_re_rendering() {
 }
 
 fn ember_config() -> litrpg_config::Config {
-    let mut c = litrpg_config::Config::default();
-    c.ember_url = litrpg_ember::DEFAULT_BASE_URL.to_string();
-    c.ember_model = litrpg_ember::DEFAULT_MODEL.to_string();
-    c
+    litrpg_config::Config {
+        ember_url: litrpg_ember::DEFAULT_BASE_URL.to_string(),
+        ember_model: litrpg_ember::DEFAULT_MODEL.to_string(),
+        ..Default::default()
+    }
 }

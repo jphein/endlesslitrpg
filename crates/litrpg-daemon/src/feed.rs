@@ -57,25 +57,22 @@ pub async fn get_feed(State(state): State<Arc<AppState>>) -> ApiResult<impl Into
 
         // `enclosure/@length` is a byte count, so it must come from the file rather
         // than an estimate; clients use it for progress and range planning.
-        let (len, mtime) = match tokio::fs::metadata(&path).await {
-            Ok(m) => (
-                m.len(),
-                m.modified()
-                    .map(crate::datetime::unix_secs)
-                    .unwrap_or_default(),
-            ),
+        let len = match tokio::fs::metadata(&path).await {
+            Ok(m) => m.len(),
             // Flagged `has_audio` but the file is gone — `.pcm`/`.mp3` are pruned
             // outside the buffer window (spec §8). Skip rather than advertise a 404.
             Err(_) => continue,
         };
 
+        // `pubDate` from `chapters.created_at` (Unix **ms**), not the MP3's mtime: a
+        // re-render for a cast change rewrites the file and would otherwise republish
+        // an old chapter to the top of every subscriber's feed.
+        let published_secs = c.created_at / 1000;
+
         let url = format!("{base}/media/{:04}.mp3", c.number);
         let title = xml_escape(&format!("Chapter {}: {}", c.number, c.title));
         let link = xml_escape(&format!("{base}/api/chapters/{}", c.number));
 
-        // `chapters.created_at` exists in the schema but is not on `ChapterRow`, so
-        // the MP3's mtime stands in for `pubDate`. It is an honest "when this audio
-        // was published" and needs no store change; revisit if `created_at` is exposed.
         items.push_str(&format!(
             "    <item>\n\
              \x20     <title>{title}</title>\n\
@@ -88,7 +85,7 @@ pub async fn get_feed(State(state): State<Arc<AppState>>) -> ApiResult<impl Into
             title = title,
             link = link,
             number = c.number,
-            pub_date = rfc2822_utc(mtime),
+            pub_date = rfc2822_utc(published_secs),
             duration = c.duration_ms / 1000,
             url = xml_escape(&url),
             len = len,

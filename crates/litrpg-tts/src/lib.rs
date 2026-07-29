@@ -29,7 +29,7 @@
 //!
 //! ```no_run
 //! use litrpg_core::SpeakerKind;
-//! use litrpg_tts::{Pcm16k, RenderRequest, TtsRegistry, azure::AzureBackend};
+//! use litrpg_tts::{DEFAULT_GAP_MS, RenderRequest, TtsRegistry, assemble, azure::AzureBackend};
 //!
 //! # async fn demo() -> Result<(), litrpg_tts::TtsError> {
 //! let registry = TtsRegistry::new().with(Box::new(AzureBackend::from_default_config()?));
@@ -41,16 +41,14 @@
 //!     SpeakerKind::Narrator,
 //! )?];
 //!
-//! // Pad each segment to a whole millisecond so the manifest's `ms * 32` byte
-//! // offsets address the joined stream exactly.
-//! let parts: Vec<Pcm16k> = registry
-//!     .render_all(&reqs)
-//!     .await?
-//!     .into_iter()
-//!     .map(Pcm16k::padded_to_whole_ms)
-//!     .collect();
-//! let chapter = Pcm16k::concat(&parts);
-//! assert_eq!(chapter.len() as u32, chapter.duration_ms() * 32);
+//! // `render_all` shards by backend; `assemble` joins the results and *measures*
+//! // where each segment landed. Never predict those offsets — `loudnorm` changes
+//! // stream length, so they are only true once the audio exists.
+//! let chapter = assemble(&registry.render_all(&reqs).await?, DEFAULT_GAP_MS);
+//! assert_eq!(chapter.pcm.len() as u32, chapter.pcm.duration_ms() * 32);
+//! for span in &chapter.spans {
+//!     let _range_header = (span.start_byte(), span.end_byte());
+//! }
 //! # Ok(())
 //! # }
 //! ```
@@ -65,7 +63,7 @@ pub mod sherpa;
 
 pub use backend::{Availability, CostClass, Gender, RenderRequest, TtsBackend, VoiceDesc};
 pub use error::{Result, TtsError};
-pub use pcm::{Pcm16k, PcmError};
+pub use pcm::{Assembly, DEFAULT_GAP_MS, Pcm16k, PcmError, Span, assemble};
 pub use registry::TtsRegistry;
 pub use resample::{FfmpegPostProcessor, PostProcess, PostProcessor};
 

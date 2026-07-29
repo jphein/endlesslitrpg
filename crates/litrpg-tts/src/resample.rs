@@ -95,13 +95,48 @@ impl PostProcess {
             ));
         }
         if self.loudnorm {
-            stages.push("loudnorm=I=-20:TP=-2:LRA=7".to_string());
+            stages.push(LOUDNORM.to_string());
         }
         stages.join(",")
     }
+
+    /// Pass-one chain: identical filters, plus JSON statistics.
+    fn measure_chain(&self, native_rate: u32) -> String {
+        let mut chain = self.without_loudnorm().filter_chain(native_rate);
+        if !chain.is_empty() {
+            chain.push(',');
+        }
+        chain.push_str(LOUDNORM);
+        chain.push_str(":print_format=json");
+        chain
+    }
+
+    /// Pass-two chain: `loudnorm` given pass one's measurements, so it applies a
+    /// known correction instead of adapting blind. `linear=true` asks for a single
+    /// gain change across the whole segment rather than dynamic movement, which is
+    /// what keeps a narration segment sounding un-pumped.
+    fn apply_chain(&self, native_rate: u32, s: &LoudnormStats) -> String {
+        let mut chain = self.without_loudnorm().filter_chain(native_rate);
+        if !chain.is_empty() {
+            chain.push(',');
+        }
+        chain.push_str(&format!(
+            "{LOUDNORM}:measured_I={:.2}:measured_TP={:.2}:measured_LRA={:.2}\
+             :measured_thresh={:.2}:offset={:.2}:linear=true",
+            s.input_i, s.input_tp, s.input_lra, s.input_thresh, s.target_offset
+        ));
+        chain
+    }
 }
 
+/// EBU R128 target. `I=-20` sits inside the ACX audiobook window (−18 to −23 LUFS).
+const LOUDNORM: &str = "loudnorm=I=-20:TP=-2:LRA=7";
+
 /// Turns native-rate float samples into the 16 kHz contract.
+///
+/// Implementations must return **whole-millisecond-aligned** audio, i.e.
+/// [`Pcm16k::is_whole_ms`] holds, so `duration_ms() * 32 == len()` is exact for
+/// everything downstream.
 pub trait PostProcessor: Send + Sync {
     fn process(&self, samples: &[f32], native_rate: u32, pp: PostProcess) -> Result<Pcm16k>;
 }
@@ -142,6 +177,15 @@ impl FfmpegPostProcessor {
 
     /// The full argv, exposed for diagnostics and tests.
     pub fn args(&self, native_rate: u32, pp: PostProcess) -> Vec<String> {
+        self.args_with_chain(native_rate, &pp.filter_chain(native_rate))
+    }
+
+    /// Build the argv around an explicit filter chain.
+    ///
+    /// Takes the chain as a parameter rather than splicing it in afterwards: `-ar`
+    /// appears in *both* the input and output sections, so "insert before the first
+    /// `-ar`" put the filter in the input options and ffmpeg rejected it.
+    fn args_with_chain(&self, native_rate: u32, chain: &str) -> Vec<String> {
         let mut args: Vec<String> = vec![
             "-hide_banner".into(),
             "-nostdin".into(),
@@ -157,10 +201,9 @@ impl FfmpegPostProcessor {
             "-i".into(),
             "pipe:0".into(),
         ];
-        let chain = pp.filter_chain(native_rate);
         if !chain.is_empty() {
             args.push("-af".into());
-            args.push(chain);
+            args.push(chain.to_string());
         }
         // Output: headerless 16 kHz mono s16le. `-f s16le` is what makes it
         // headerless — a `.pcm` extension alone does not, and a leaked 44-byte
@@ -179,11 +222,47 @@ impl FfmpegPostProcessor {
         args
     }
 
-    /// Process raw bytes already in some pcm-ish input format. Split out so the
-    /// sherpa plugin can avoid a second copy of the sample buffer.
-    fn run(&self, input: &[u8], native_rate: u32, pp: PostProcess) -> Result<Pcm16k> {
+    /// The measurement half of two-pass `loudnorm`: same filters, output discarded,
+    /// statistics printed as JSON.
+    ///
+    /// `-v info` is deliberate. `loudnorm`'s `print_format=json` block is logged at
+    /// INFO, so `-v error` would suppress it and this pass would silently measure
+    /// nothing — the same trap Reverie hit with `ebur128`.
+    fn args_measure(&self, native_rate: u32, pp: PostProcess) -> Vec<String> {
+        let mut args: Vec<String> = vec![
+            "-hide_banner".into(),
+            "-nostdin".into(),
+            "-nostats".into(),
+            "-v".into(),
+            "info".into(),
+            "-f".into(),
+            "f32le".into(),
+            "-ar".into(),
+            native_rate.to_string(),
+            "-ac".into(),
+            "1".into(),
+            "-i".into(),
+            "pipe:0".into(),
+            "-af".into(),
+            pp.measure_chain(native_rate),
+            "-f".into(),
+            "null".into(),
+            "-".into(),
+        ];
+        args.retain(|a| !a.is_empty());
+        args
+    }
+
+    /// The applying half: `loudnorm` fed the measured statistics, so it corrects
+    /// with full knowledge of the signal instead of streaming blind.
+    fn args_apply(&self, native_rate: u32, pp: PostProcess, stats: &LoudnormStats) -> Vec<String> {
+        self.args_with_chain(native_rate, &pp.apply_chain(native_rate, stats))
+    }
+
+    /// Run one ffmpeg pass, returning `(stdout, stderr)`.
+    fn run_pass(&self, input: &[u8], args: Vec<String>, stage: &str) -> Result<(Vec<u8>, String)> {
         let mut child = Command::new(&self.ffmpeg)
-            .args(self.args(native_rate, pp))
+            .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -215,33 +294,68 @@ impl FfmpegPostProcessor {
         // reports the real reason, so don't mask it with the write error.
         let write_failed = matches!(writer.join(), Ok(Err(_)) | Err(_));
 
+        let stderr_text = String::from_utf8_lossy(&out.stderr).into_owned();
+
         if !out.status.success() {
             return Err(TtsError::Ffmpeg {
-                stage: format!(
-                    "ffmpeg {}→16k{}{}",
-                    native_rate,
-                    if pp.system_fx { " +fx" } else { "" },
-                    if pp.loudnorm { " +loudnorm" } else { "" }
-                ),
+                stage: stage.to_string(),
                 status: out.status.to_string(),
-                stderr: String::from_utf8_lossy(&out.stderr)
-                    .chars()
-                    .take(500)
-                    .collect(),
+                stderr: stderr_text.chars().rev().take(600).collect::<String>()
+                    .chars().rev().collect(),
             });
         }
-        if write_failed && out.stdout.is_empty() {
+        if write_failed && out.stdout.is_empty() && !stage.contains("measure") {
             return Err(TtsError::Ffmpeg {
-                stage: "ffmpeg stdin".into(),
+                stage: format!("{stage} (stdin)"),
                 status: "write failed".into(),
-                stderr: String::from_utf8_lossy(&out.stderr)
-                    .chars()
-                    .take(500)
-                    .collect(),
+                stderr: stderr_text.chars().take(500).collect(),
             });
         }
 
-        Pcm16k::new(out.stdout).map_err(Into::into)
+        Ok((out.stdout, stderr_text))
+    }
+
+    /// Align at the boundary, not at the call site. ffmpeg lands on whatever sample
+    /// count the resample ratio and `loudnorm`'s filter delay produce, so the engine
+    /// would otherwise have to remember to pad every segment — and forgetting is
+    /// silent, cumulative manifest drift.
+    fn finish(&self, stdout: Vec<u8>) -> Result<Pcm16k> {
+        Ok(Pcm16k::new(stdout)?.padded_to_whole_ms())
+    }
+}
+
+/// `loudnorm`'s first-pass measurements.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LoudnormStats {
+    pub input_i: f64,
+    pub input_tp: f64,
+    pub input_lra: f64,
+    pub input_thresh: f64,
+    pub target_offset: f64,
+}
+
+impl LoudnormStats {
+    /// Parse the `print_format=json` block out of ffmpeg's stderr.
+    ///
+    /// Returns `None` when the block is absent or any figure is non-finite. `-inf`
+    /// is what a silent or near-silent buffer measures, and feeding that back into
+    /// pass two produces garbage — so the caller falls back to a single pass.
+    pub fn parse(stderr: &str) -> Option<Self> {
+        let start = stderr.rfind('{')?;
+        let end = stderr[start..].find('}')? + start + 1;
+        let map: std::collections::HashMap<String, String> =
+            serde_json::from_str(&stderr[start..end]).ok()?;
+        let get = |k: &str| -> Option<f64> {
+            let v = map.get(k)?.trim().parse::<f64>().ok()?;
+            v.is_finite().then_some(v)
+        };
+        Some(Self {
+            input_i: get("input_i")?,
+            input_tp: get("input_tp")?,
+            input_lra: get("input_lra")?,
+            input_thresh: get("input_thresh")?,
+            target_offset: get("target_offset")?,
+        })
     }
 }
 
@@ -254,6 +368,46 @@ impl PostProcessor for FfmpegPostProcessor {
         for s in samples {
             bytes.extend_from_slice(&s.to_le_bytes());
         }
-        self.run(&bytes, native_rate, pp)
+
+        if !pp.loudnorm {
+            let (out, _) = self.run_pass(&bytes, self.args(native_rate, pp), "resample")?;
+            return self.finish(out);
+        }
+
+        // Two-pass loudnorm. Single-pass `loudnorm` is a *streaming* normalizer: it
+        // corrects as it goes, with only its lookahead buffer to work from. On the
+        // 2-3 s segments a chapter is made of that is not enough to converge —
+        // measured a 2.0 LU spread across cori / Kokoro / Kokoro+FX, above the ~1 LU
+        // just-noticeable difference and plainly audible at a segment join. Reverie's
+        // 0.7 LU figure came from 8-13 s segments, which is why single-pass looked
+        // sufficient in the spike. Measuring first and then correcting with the real
+        // statistics is what makes short segments level.
+        //
+        // Cost is one extra ffmpeg invocation per segment, still far under 2% of
+        // synthesis. The FX chain runs in *both* passes so pass one measures the
+        // coloured signal, not the raw one.
+        let (_, stderr) = self.run_pass(
+            &bytes,
+            self.args_measure(native_rate, pp),
+            "loudnorm measure",
+        )?;
+
+        match LoudnormStats::parse(&stderr) {
+            Some(stats) => {
+                let (out, _) = self.run_pass(
+                    &bytes,
+                    self.args_apply(native_rate, pp, &stats),
+                    "loudnorm apply",
+                )?;
+                self.finish(out)
+            }
+            // Near-silent input measures as `-inf`; correcting from that is worse
+            // than not correcting. Degrade to the single streaming pass.
+            None => {
+                let (out, _) =
+                    self.run_pass(&bytes, self.args(native_rate, pp), "resample (1-pass)")?;
+                self.finish(out)
+            }
+        }
     }
 }

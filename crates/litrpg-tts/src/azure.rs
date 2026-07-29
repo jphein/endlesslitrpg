@@ -160,7 +160,9 @@ impl AzureConfig {
             }
         };
 
-        let env_key = std::env::var("AZURE_SPEECH_KEY").ok().filter(|k| !k.is_empty());
+        let env_key = std::env::var("AZURE_SPEECH_KEY")
+            .ok()
+            .filter(|k| !k.is_empty());
         let env_region = std::env::var("AZURE_SPEECH_REGION")
             .ok()
             .filter(|r| !r.is_empty());
@@ -260,12 +262,42 @@ impl AzureConfig {
 /// **config, not code**: `AzureBackend::with_voices` replaces the list, so adding
 /// a guest voice needs no code change.
 const DRAGONHD_VOICES: &[(&str, &str, &str, Gender)] = &[
-    ("en-GB-Ada:DragonHDLatestNeural", "Ada (DragonHD)", "en-GB", Gender::Female),
-    ("en-GB-OllieMultilingual:DragonHDLatestNeural", "Ollie (DragonHD)", "en-GB", Gender::Male),
-    ("en-US-Ava:DragonHDLatestNeural", "Ava (DragonHD)", "en-US", Gender::Female),
-    ("en-US-Andrew:DragonHDLatestNeural", "Andrew (DragonHD)", "en-US", Gender::Male),
-    ("en-US-Emma:DragonHDLatestNeural", "Emma (DragonHD)", "en-US", Gender::Female),
-    ("en-US-Steffan:DragonHDLatestNeural", "Steffan (DragonHD)", "en-US", Gender::Male),
+    (
+        "en-GB-Ada:DragonHDLatestNeural",
+        "Ada (DragonHD)",
+        "en-GB",
+        Gender::Female,
+    ),
+    (
+        "en-GB-OllieMultilingual:DragonHDLatestNeural",
+        "Ollie (DragonHD)",
+        "en-GB",
+        Gender::Male,
+    ),
+    (
+        "en-US-Ava:DragonHDLatestNeural",
+        "Ava (DragonHD)",
+        "en-US",
+        Gender::Female,
+    ),
+    (
+        "en-US-Andrew:DragonHDLatestNeural",
+        "Andrew (DragonHD)",
+        "en-US",
+        Gender::Male,
+    ),
+    (
+        "en-US-Emma:DragonHDLatestNeural",
+        "Emma (DragonHD)",
+        "en-US",
+        Gender::Female,
+    ),
+    (
+        "en-US-Steffan:DragonHDLatestNeural",
+        "Steffan (DragonHD)",
+        "en-US",
+        Gender::Male,
+    ),
 ];
 
 /// The Azure DragonHD backend.
@@ -364,8 +396,12 @@ impl AzureBackend {
 
         let bytes = resp.bytes().await?;
         // An odd length means a truncated stream — surface it rather than let a
-        // half sample shift every subsequent segment by one byte.
-        Pcm16k::new(bytes.to_vec()).map_err(Into::into)
+        // half sample shift every subsequent segment by one byte. Then align to a
+        // whole millisecond, same as the sherpa path, so no caller has to know
+        // which backend produced a buffer. (Measured Azure responses happen to land
+        // on whole milliseconds already, so this is usually a no-op — but relying on
+        // that would be relying on an undocumented server behaviour.)
+        Ok(Pcm16k::new(bytes.to_vec())?.padded_to_whole_ms())
     }
 }
 

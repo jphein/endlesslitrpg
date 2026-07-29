@@ -1,8 +1,6 @@
 //! Pure unit tests for Range parsing (RFC 7233).
 
-use litrpg_daemon::range::{
-    RangeOutcome, content_range, content_range_unsatisfied, parse_range,
-};
+use litrpg_daemon::range::{RangeOutcome, content_range, content_range_unsatisfied, parse_range};
 
 /// Chapter 1's size in the fixture: 3000 ms x 32 B/ms.
 const TOTAL: u64 = 96_000;
@@ -102,9 +100,18 @@ fn zero_length_suffix_is_unsatisfiable() {
 
 #[test]
 fn empty_representation_cannot_satisfy_any_range() {
-    assert_eq!(parse_range(Some("bytes=0-"), 0), RangeOutcome::Unsatisfiable);
-    assert_eq!(parse_range(Some("bytes=0-10"), 0), RangeOutcome::Unsatisfiable);
-    assert_eq!(parse_range(Some("bytes=-10"), 0), RangeOutcome::Unsatisfiable);
+    assert_eq!(
+        parse_range(Some("bytes=0-"), 0),
+        RangeOutcome::Unsatisfiable
+    );
+    assert_eq!(
+        parse_range(Some("bytes=0-10"), 0),
+        RangeOutcome::Unsatisfiable
+    );
+    assert_eq!(
+        parse_range(Some("bytes=-10"), 0),
+        RangeOutcome::Unsatisfiable
+    );
     // No header on an empty file is still a plain 200 with an empty body.
     assert_eq!(parse_range(None, 0), RangeOutcome::Full);
 }
@@ -157,10 +164,7 @@ fn content_length_matches_outcome() {
     assert_eq!(RangeOutcome::Full.content_length(TOTAL), TOTAL);
     assert_eq!(partial(0, 99).content_length(TOTAL), 100);
     assert_eq!(partial(0, 0).content_length(TOTAL), 1);
-    assert_eq!(
-        partial(32_000, 63_999).content_length(TOTAL),
-        32_000
-    );
+    assert_eq!(partial(32_000, 63_999).content_length(TOTAL), 32_000);
     assert_eq!(RangeOutcome::Unsatisfiable.content_length(TOTAL), 0);
 }
 

@@ -2,6 +2,7 @@
 //!
 //! 16 kHz mono s16le, headerless, exactly 32 000 B/s = 32 B/ms.
 
+use litrpg_tts::pcm::{Span, assemble};
 use litrpg_tts::{Pcm16k, PcmError};
 use proptest::prelude::*;
 
@@ -87,6 +88,115 @@ fn extend_appends_in_order() {
     assert_eq!(a.as_bytes(), &[1u8, 2, 3, 4]);
 }
 
+#[test]
+fn an_even_length_buffer_never_needs_more_than_30_pad_bytes() {
+    // Remainders of an even length are even, so the pad is in 2..=30 — under a
+    // millisecond, inaudible. An odd length cannot reach here at all.
+    for samples in 1..64usize {
+        let n = samples * 2;
+        let p = Pcm16k::new(vec![1u8; n]).unwrap().padded_to_whole_ms();
+        assert!(p.len() - n <= 30, "{n} B needed {} pad bytes", p.len() - n);
+        assert!(p.is_whole_ms());
+    }
+}
+
+// ------------------------------------------------------------ chapter assembly
+
+#[test]
+fn the_documented_default_gap_is_zero() {
+    assert_eq!(
+        litrpg_tts::pcm::DEFAULT_GAP_MS,
+        0,
+        "a gap is a pacing choice someone opts into, not a default"
+    );
+}
+
+#[test]
+fn assembly_defaults_to_no_gap_between_segments() {
+    // Joins are click-free without padding (spike Part 2 §2.4): measured join
+    // deltas of 6 and 1 against a p99.9 signal delta of ~3595, because sherpa
+    // output already begins and ends at ~zero amplitude. So a gap is a narrative
+    // pacing choice, never artifact suppression, and the default is none.
+    let parts = vec![Pcm16k::silence_ms(100), Pcm16k::silence_ms(200)];
+    let a = assemble(&parts, 0);
+    assert_eq!(a.pcm.duration_ms(), 300);
+    assert_eq!(a.spans, vec![Span::new(0, 100), Span::new(100, 300)]);
+}
+
+#[test]
+fn a_pacing_gap_goes_between_segments_only() {
+    let parts = vec![
+        Pcm16k::silence_ms(100),
+        Pcm16k::silence_ms(200),
+        Pcm16k::silence_ms(300),
+    ];
+    let a = assemble(&parts, 120);
+    // Two gaps for three segments — never a leading or trailing one.
+    assert_eq!(a.pcm.duration_ms(), 600 + 240);
+    assert_eq!(a.spans.first().unwrap().start_ms, 0);
+    assert_eq!(a.spans.last().unwrap().end_ms, a.pcm.duration_ms());
+}
+
+#[test]
+fn a_gap_is_attributed_to_the_segment_it_follows() {
+    // The beat after a line belongs to that line: the watch keeps highlighting
+    // the sentence just spoken through the pause, instead of jumping early to a
+    // sentence that has not started making sound.
+    let parts = vec![Pcm16k::silence_ms(100), Pcm16k::silence_ms(200)];
+    let a = assemble(&parts, 50);
+    assert_eq!(a.spans[0], Span::new(0, 150), "gap trails segment 0");
+    assert_eq!(a.spans[1], Span::new(150, 350));
+}
+
+#[test]
+fn assembly_spans_are_contiguous_and_cover_the_whole_stream() {
+    let parts = vec![
+        Pcm16k::silence_ms(10),
+        Pcm16k::silence_ms(20),
+        Pcm16k::silence_ms(30),
+    ];
+    let a = assemble(&parts, 15);
+    assert_eq!(a.spans[0].start_ms, 0);
+    for w in a.spans.windows(2) {
+        assert_eq!(w[0].end_ms, w[1].start_ms, "a gap would strand the watch");
+    }
+    assert_eq!(a.spans.last().unwrap().end_ms, a.pcm.duration_ms());
+}
+
+#[test]
+fn assembly_aligns_misaligned_parts_so_offsets_stay_exact() {
+    // loudnorm's filter delay changes stream length (Reverie's SYSTEM segment came
+    // out 104 B shorter), so parts arriving here may not be whole-ms. Offsets are
+    // measured from the final PCM, never precomputed.
+    let parts = vec![
+        Pcm16k::new(vec![1u8; 3_206]).unwrap(), // 3206 % 32 == 6
+        Pcm16k::new(vec![2u8; 1_998]).unwrap(), // 1998 % 32 == 14
+    ];
+    let a = assemble(&parts, 0);
+    assert!(a.pcm.is_whole_ms());
+    assert_eq!(a.pcm.len() as u32, a.pcm.duration_ms() * 32);
+    for (i, s) in a.spans.iter().enumerate() {
+        let slice = &a.pcm.as_bytes()[s.start_byte() as usize..s.end_byte() as usize];
+        assert_eq!(slice.len() as u32, s.duration_ms() * 32);
+        // Each span still opens on its own segment's fill byte.
+        assert_eq!(slice[0], parts[i].as_bytes()[0]);
+    }
+}
+
+#[test]
+fn assembling_nothing_is_empty() {
+    let a = assemble(&[], 120);
+    assert!(a.pcm.is_empty());
+    assert!(a.spans.is_empty());
+}
+
+#[test]
+fn assembling_one_segment_inserts_no_gap() {
+    let a = assemble(&[Pcm16k::silence_ms(100)], 500);
+    assert_eq!(a.pcm.duration_ms(), 100);
+    assert_eq!(a.spans, vec![Span::new(0, 100)]);
+}
+
 // ------------------------------------------------------------ property tests
 
 proptest! {
@@ -125,7 +235,35 @@ proptest! {
         prop_assert!(p.is_whole_ms());
         prop_assert_eq!(p.duration_ms() * 32, p.len() as u32);
         prop_assert!(p.len() >= n);
-        prop_assert!(p.len() - n < 32);
+        prop_assert!(p.len() - n <= 30, "even lengths never need 31 pad bytes");
+    }
+
+    /// Assembly is exact for any part sizes and any gap — this is the identity the
+    /// watch's Range requests and sentence highlighting rest on.
+    #[test]
+    fn assembly_arithmetic_is_always_exact(
+        parts in prop::collection::vec(1usize..600, 1..10),
+        gap_ms in 0u32..250,
+    ) {
+        let pcms: Vec<Pcm16k> = parts
+            .iter()
+            .map(|&s| Pcm16k::new(vec![9u8; s * 2]).unwrap())
+            .collect();
+        let a = assemble(&pcms, gap_ms);
+
+        prop_assert!(a.pcm.is_whole_ms());
+        prop_assert_eq!(a.pcm.len() as u32, a.pcm.duration_ms() * 32);
+        prop_assert_eq!(a.spans.len(), pcms.len());
+        prop_assert_eq!(a.spans[0].start_ms, 0);
+        prop_assert_eq!(a.spans[a.spans.len() - 1].end_ms, a.pcm.duration_ms());
+        for w in a.spans.windows(2) {
+            prop_assert_eq!(w[0].end_ms, w[1].start_ms);
+        }
+        // Every span addresses real bytes inside the stream.
+        for s in &a.spans {
+            prop_assert!(s.end_byte() <= a.pcm.len() as u64);
+            prop_assert_eq!(s.end_byte() - s.start_byte(), s.duration_ms() as u64 * 32);
+        }
     }
 
     /// Concatenation preserves total duration — this is what lets one chapter

@@ -5,7 +5,7 @@ mod common;
 use axum::http::StatusCode;
 use common::{
     CH1_DURATION_MS, assert_status, body_json, body_string, fixture, fixture_with_ledger,
-    header,
+    fixture_with_protagonist, fixture_with_story_row, header,
 };
 
 #[tokio::test]
@@ -49,7 +49,10 @@ async fn version_matches_realm_sigil_schema() {
         "repo",
         "commit_url",
     ] {
-        assert!(v.get(field).is_some(), "missing /api/version field {field:?}");
+        assert!(
+            v.get(field).is_some(),
+            "missing /api/version field {field:?}"
+        );
     }
 
     assert_eq!(v["name"], "litrpg-daemon");
@@ -78,6 +81,59 @@ async fn story_reports_counts_and_audio_constants() {
     assert_eq!(v["dirty_chapters"], serde_json::json!([2]));
 }
 
+/// No `story` row yet: config supplies the fallback and `initialised` says so.
+#[tokio::test]
+async fn story_falls_back_to_config_before_init() {
+    let f = fixture();
+    let v = body_json(f.get("/api/story").await).await;
+
+    assert_eq!(v["initialised"], false);
+    assert_eq!(v["title"], "Endless & Onward");
+    assert_eq!(v["protagonist"], "Kael");
+    assert!(v["target_words"].is_null());
+    assert!(v["prompt_hash"].is_null());
+}
+
+/// Once a `story` row exists it is the authority — config must not shadow the
+/// canonical record of what the story is.
+#[tokio::test]
+async fn story_table_outranks_config() {
+    let f = fixture_with_story_row("Seryn", "ConfigFallback");
+    let v = body_json(f.get("/api/story").await).await;
+
+    assert_eq!(v["initialised"], true);
+    assert_eq!(v["title"], "The Sunken Vale");
+    assert_eq!(v["protagonist"], "Seryn");
+    assert_ne!(v["title"], "Config Title (must lose)");
+    assert_eq!(v["target_words"], 2500);
+    assert_eq!(v["prompt_hash"], "storyhash1");
+}
+
+/// `/api/character` resolves the protagonist from the store, not config.
+#[tokio::test]
+async fn protagonist_route_prefers_the_story_table() {
+    // The ledger describes "Kael"; the story row names "Kael" too, while config points
+    // somewhere else — so reading config would produce a `known: false` body.
+    let f = fixture_with_story_row("Kael", "SomeoneElse");
+    let v = body_json(f.get("/api/character").await).await;
+
+    assert_eq!(v["subject"], "Kael");
+    assert_eq!(
+        v["known"], true,
+        "must resolve via the story table, not config"
+    );
+    assert_eq!(v["level"], 3);
+}
+
+/// A blank column must not shadow a usable configured fallback with an empty string.
+#[tokio::test]
+async fn blank_story_protagonist_falls_back_to_config() {
+    let f = fixture_with_story_row("   ", "Kael");
+    let v = body_json(f.get("/api/character").await).await;
+    assert_eq!(v["subject"], "Kael");
+    assert_eq!(v["known"], true);
+}
+
 #[tokio::test]
 async fn chapter_index_lists_both_and_marks_audio() {
     let f = fixture();
@@ -92,10 +148,7 @@ async fn chapter_index_lists_both_and_marks_audio() {
     // duration_ms * 32 — the identity that holds because segments are padded to a
     // 32-byte boundary.
     assert_eq!(items[0]["total_bytes"], CH1_DURATION_MS as u64 * 32);
-    assert_eq!(
-        items[0]["pcm_url"],
-        "http://10.0.6.107:8093/media/0001.pcm"
-    );
+    assert_eq!(items[0]["pcm_url"], "http://10.0.6.107:8093/media/0001.pcm");
     assert!(items[0]["words"].as_u64().unwrap() > 0);
 
     assert_eq!(items[1]["number"], 2);
@@ -222,6 +275,60 @@ async fn character_exposes_all_slots_and_traits() {
     assert!(appear["eyes"].is_null());
 }
 
+/// `/api/character` with no subject resolves to the protagonist, so the watch's
+/// character screen need not already know whose story this is (spec §9.4.1).
+#[tokio::test]
+async fn character_without_subject_resolves_to_protagonist() {
+    let f = fixture_with_protagonist("Kael");
+    let resp = f.get("/api/character").await;
+    assert_status(&resp, StatusCode::OK);
+
+    let v = body_json(resp).await;
+    assert_eq!(v["subject"], "Kael");
+    assert_eq!(v["known"], true);
+    assert_eq!(v["level"], 3);
+}
+
+/// The bare route and the explicit route must return byte-identical bodies, or the
+/// watch would see different data depending on which URL it happened to use.
+#[tokio::test]
+async fn protagonist_route_matches_explicit_subject_route() {
+    let f = fixture_with_protagonist("Kael");
+    let implicit = body_json(f.get("/api/character").await).await;
+    let explicit = body_json(f.get("/api/character/Kael").await).await;
+    assert_eq!(implicit, explicit);
+}
+
+/// Whitespace in configuration must not become a request for the subject `"  "`.
+#[tokio::test]
+async fn protagonist_is_trimmed_before_lookup() {
+    let f = fixture_with_protagonist("  Kael  ");
+    let v = body_json(f.get("/api/character").await).await;
+    assert_eq!(v["subject"], "Kael");
+    assert_eq!(v["known"], true);
+}
+
+/// An unconfigured protagonist is a 400, not an empty 200: answering for the subject
+/// `""` would render a blank screen that looks like a story with no protagonist rather
+/// than a daemon that was never told who it is.
+#[tokio::test]
+async fn unconfigured_protagonist_is_a_clear_error() {
+    let f = fixture_with_protagonist("");
+    let resp = f.get("/api/character").await;
+    assert_status(&resp, StatusCode::BAD_REQUEST);
+
+    let v = body_json(resp).await;
+    let msg = v["error"].as_str().unwrap();
+    assert!(
+        msg.contains("protagonist"),
+        "error must name what is missing, got {msg:?}"
+    );
+    assert!(
+        msg.contains("LITRPG_PROTAGONIST"),
+        "error must say how to fix it, got {msg:?}"
+    );
+}
+
 /// An unknown subject is a populated-but-empty 200, not a 404: the watch's screens are
 /// a fixed layout and should not need an error path for "not introduced yet".
 #[tokio::test]
@@ -256,7 +363,10 @@ async fn note_body_must_be_non_empty() {
     let f = fixture();
     for bad in ["", "   ", "\n\t "] {
         let resp = f
-            .post_json("/api/notes", serde_json::json!({"body": bad, "source": "cli"}))
+            .post_json(
+                "/api/notes",
+                serde_json::json!({"body": bad, "source": "cli"}),
+            )
             .await;
         assert_status(&resp, StatusCode::BAD_REQUEST);
     }
@@ -267,37 +377,59 @@ async fn oversized_note_is_rejected() {
     let f = fixture();
     let huge = "x".repeat(litrpg_daemon::notes::MAX_NOTE_BYTES + 1);
     let resp = f
-        .post_json("/api/notes", serde_json::json!({"body": huge, "source": "cli"}))
+        .post_json(
+            "/api/notes",
+            serde_json::json!({"body": huge, "source": "cli"}),
+        )
         .await;
     assert_status(&resp, StatusCode::BAD_REQUEST);
 }
 
-/// A **valid** note currently returns 501, because the `notes` table has no accessor
-/// in `litrpg-store` (see `notes.rs`). Asserted explicitly rather than skipped so the
-/// gap is visible in the suite, and so this test fails loudly — prompting an update to
-/// 201/200 — the moment `Store::insert_note` lands.
+/// Previously asserted a documented 501; `Store::insert_note` now exists, so a valid
+/// note must actually persist and report `201 Created`.
 #[tokio::test]
-async fn valid_note_is_501_until_store_supports_it() {
+async fn valid_note_is_created() {
     let f = fixture();
     let resp = f
         .post_json(
             "/api/notes",
-            serde_json::json!({"body": "introduce a rival", "source": "watch"}),
+            serde_json::json!({"body": "  introduce a rival  ", "source": "watch"}),
         )
         .await;
 
-    assert_status(&resp, StatusCode::NOT_IMPLEMENTED);
+    assert_status(&resp, StatusCode::CREATED);
     let v = body_json(resp).await;
     assert!(
-        v["error"].as_str().unwrap().contains("insert_note"),
-        "the 501 must name the missing store method"
+        v["id"].as_i64().unwrap() > 0,
+        "must return the stored row id"
     );
+    // Echo what was persisted, not what was sent, so a client needn't guess about
+    // whitespace.
+    assert_eq!(v["body"], "introduce a rival");
+    assert_eq!(v["source"], "watch");
 }
 
-/// `/api/voices` is deliberately absent until `litrpg-tts` exists — absent, not a stub
-/// returning a shape clients would code against and then have to unlearn.
+/// Each accepted source must work, and ids must advance — proof the rows really land
+/// rather than the handler returning a constant.
 #[tokio::test]
-async fn voices_route_is_absent_pending_litrpg_tts() {
+async fn notes_persist_across_sources_with_distinct_ids() {
     let f = fixture();
-    assert_status(&f.get("/api/voices").await, StatusCode::NOT_FOUND);
+    let mut ids = Vec::new();
+
+    for source in ["cli", "watch", "candela"] {
+        let resp = f
+            .post_json(
+                "/api/notes",
+                serde_json::json!({"body": format!("note from {source}"), "source": source}),
+            )
+            .await;
+        assert_status(&resp, StatusCode::CREATED);
+        ids.push(body_json(resp).await["id"].as_i64().unwrap());
+    }
+
+    assert_eq!(ids.len(), 3);
+    assert!(
+        ids.windows(2).all(|w| w[1] > w[0]),
+        "note ids must be distinct and increasing, got {ids:?}"
+    );
 }

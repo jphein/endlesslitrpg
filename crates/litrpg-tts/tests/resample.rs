@@ -6,7 +6,7 @@
 //! no native libs. The invocation is Reverie's verified one (spike Part 2 §2.3),
 //! adapted to read f32 samples from a pipe instead of a `.wav` file.
 
-use litrpg_tts::resample::{FfmpegPostProcessor, PostProcess, PostProcessor};
+use litrpg_tts::resample::{FfmpegPostProcessor, LoudnormStats, PostProcess, PostProcessor};
 
 /// A 220 Hz tone. Real audio, not zeros — a silent buffer would pass a resampler
 /// test that a broken filter chain would also pass.
@@ -33,7 +33,11 @@ fn kokoro_24k_resamples_to_exactly_32000_bytes_per_second() {
     let pcm = pp
         .process(&tone(24_000, 1.5), 24_000, PostProcess::plain())
         .unwrap();
-    assert_eq!(pcm.len(), 48_000, "1.5 s must be 48 000 B at 16 kHz mono s16le");
+    assert_eq!(
+        pcm.len(),
+        48_000,
+        "1.5 s must be 48 000 B at 16 kHz mono s16le"
+    );
     assert_eq!(pcm.duration_ms(), 1_500);
     assert!(pcm.is_whole_ms());
 }
@@ -58,7 +62,11 @@ fn the_output_is_headerless() {
     let pcm = pp
         .process(&tone(24_000, 0.5), 24_000, PostProcess::plain())
         .unwrap();
-    assert_eq!(pcm.len(), 16_000, "a 44-byte RIFF header would show up here");
+    assert_eq!(
+        pcm.len(),
+        16_000,
+        "a 44-byte RIFF header would show up here"
+    );
     assert_ne!(&pcm.as_bytes()[..4], b"RIFF");
 }
 
@@ -84,7 +92,11 @@ fn loudnorm_holds_the_byte_contract_and_changes_the_level() {
         .process(&tone(24_000, 2.0), 24_000, PostProcess::plain())
         .unwrap();
     let normed = pp
-        .process(&tone(24_000, 2.0), 24_000, PostProcess::plain().with_loudnorm())
+        .process(
+            &tone(24_000, 2.0),
+            24_000,
+            PostProcess::plain().with_loudnorm(),
+        )
         .unwrap();
 
     // Reverie measured loudnorm's filter delay shifting length by ~100 B on real
@@ -138,6 +150,50 @@ fn the_system_voice_chain_actually_changes_the_signal() {
 }
 
 #[test]
+fn output_is_always_whole_millisecond_aligned() {
+    let Some(pp) = ffmpeg_or_skip() else { return };
+    // Sample counts chosen so the naive resample lands off a 32-byte boundary:
+    // 1000 samples @ 24k -> ~667 samples out = 1334 B, and 1334 % 32 == 22.
+    // Padding at this boundary is what keeps duration_ms() * 32 == len() true for
+    // everything the engine ever sees, so it cannot forget to do it.
+    for n in [1_000usize, 1_001, 1_337, 4_003, 51] {
+        let samples: Vec<f32> = (0..n)
+            .map(|i| 0.3 * (std::f32::consts::TAU * 220.0 * i as f32 / 24_000.0).sin())
+            .collect();
+        for pp_mode in [
+            PostProcess::plain(),
+            PostProcess::normalized(),
+            PostProcess::system_voice(),
+        ] {
+            let pcm = pp.process(&samples, 24_000, pp_mode).unwrap();
+            assert!(
+                pcm.is_whole_ms(),
+                "{n} samples with {pp_mode:?} gave {} B ({} past a ms)",
+                pcm.len(),
+                pcm.remainder_bytes()
+            );
+            assert_eq!(pcm.duration_ms() * 32, pcm.len() as u32);
+        }
+    }
+}
+
+#[test]
+fn alignment_padding_is_under_a_millisecond_so_it_cannot_drift_timings() {
+    let Some(pp) = ffmpeg_or_skip() else { return };
+    // 10 s of audio: if alignment were adding anything material, it would show.
+    let samples: Vec<f32> = (0..240_000)
+        .map(|i| 0.3 * (std::f32::consts::TAU * 220.0 * i as f32 / 24_000.0).sin())
+        .collect();
+    let pcm = pp.process(&samples, 24_000, PostProcess::plain()).unwrap();
+    let expected = 10_000u32;
+    assert!(
+        pcm.duration_ms().abs_diff(expected) <= 1,
+        "10 s became {} ms",
+        pcm.duration_ms()
+    );
+}
+
+#[test]
 fn empty_input_yields_empty_output_without_invoking_a_subprocess() {
     let pp = FfmpegPostProcessor::default();
     let pcm = pp.process(&[], 24_000, PostProcess::plain()).unwrap();
@@ -148,10 +204,15 @@ fn empty_input_yields_empty_output_without_invoking_a_subprocess() {
 fn the_filter_chain_is_built_in_the_verified_order() {
     // Order matters: FX colouring, then loudness normalization, then resample.
     // Normalizing before the compressor would be undone by it.
-    let chain = PostProcess::system_voice().with_loudnorm().filter_chain(24_000);
+    let chain = PostProcess::system_voice()
+        .with_loudnorm()
+        .filter_chain(24_000);
     let fx = chain.find("tremolo").expect("FX stage missing");
     let ln = chain.find("loudnorm").expect("loudnorm stage missing");
-    assert!(fx < ln, "loudnorm must come after the SYSTEM colouring: {chain}");
+    assert!(
+        fx < ln,
+        "loudnorm must come after the SYSTEM colouring: {chain}"
+    );
     assert!(chain.contains("asetrate=24000*0.92"));
     assert!(chain.contains("aresample=24000"));
     assert!(chain.contains("atempo=1/0.92"));
@@ -173,4 +234,72 @@ fn the_system_chain_is_parameterized_by_the_models_native_rate() {
 #[test]
 fn a_plain_pass_has_no_filters_at_all() {
     assert!(PostProcess::plain().filter_chain(24_000).is_empty());
+}
+
+// ------------------------------------------------------- two-pass loudnorm stats
+
+#[test]
+fn loudnorm_stats_parse_from_a_real_ffmpeg_json_block() {
+    // Verbatim shape of what `loudnorm=...:print_format=json` writes to stderr.
+    let stderr = r#"[Parsed_loudnorm_0 @ 0x5555]
+{
+	"input_i" : "-25.10",
+	"input_tp" : "-9.35",
+	"input_lra" : "1.80",
+	"input_thresh" : "-35.23",
+	"output_i" : "-20.01",
+	"output_tp" : "-2.00",
+	"output_lra" : "1.70",
+	"output_thresh" : "-30.14",
+	"normalization_type" : "dynamic",
+	"target_offset" : "0.12"
+}
+"#;
+    let s = LoudnormStats::parse(stderr).expect("should parse");
+    assert_eq!(s.input_i, -25.10);
+    assert_eq!(s.input_tp, -9.35);
+    assert_eq!(s.input_lra, 1.80);
+    assert_eq!(s.input_thresh, -35.23);
+    assert_eq!(s.target_offset, 0.12);
+}
+
+#[test]
+fn non_finite_measurements_are_refused_so_the_caller_can_fall_back() {
+    // A silent or near-silent buffer measures as -inf. Feeding that into pass two
+    // produces garbage, so it must read as "unmeasurable", not as a number.
+    let stderr = r#"{
+	"input_i" : "-inf",
+	"input_tp" : "-120.00",
+	"input_lra" : "0.00",
+	"input_thresh" : "-inf",
+	"target_offset" : "0.00"
+}"#;
+    assert!(
+        LoudnormStats::parse(stderr).is_none(),
+        "-inf must not be accepted as a measurement"
+    );
+}
+
+#[test]
+fn a_missing_json_block_is_refused_rather_than_guessed() {
+    assert!(LoudnormStats::parse("").is_none());
+    assert!(LoudnormStats::parse("ffmpeg version 6.1.1\nno stats here").is_none());
+    // Present but incomplete: missing target_offset.
+    assert!(
+        LoudnormStats::parse(r#"{"input_i":"-25.1","input_tp":"-9.3"}"#).is_none(),
+        "a partial block must not be half-applied"
+    );
+}
+
+#[test]
+fn a_silent_buffer_still_produces_valid_pcm_via_the_single_pass_fallback() {
+    let Some(pp) = ffmpeg_or_skip() else { return };
+    // Digital silence measures -inf, exercising the fallback path end to end.
+    let silence = vec![0.0f32; 24_000];
+    let pcm = pp
+        .process(&silence, 24_000, PostProcess::normalized())
+        .unwrap();
+    assert!(!pcm.is_empty(), "silence must still yield a buffer");
+    assert!(pcm.is_whole_ms());
+    assert_eq!(pcm.duration_ms() * 32, pcm.len() as u32);
 }

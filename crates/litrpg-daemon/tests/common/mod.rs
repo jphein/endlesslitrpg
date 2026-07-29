@@ -15,8 +15,56 @@ use litrpg_core::manifest::{Manifest, Segment, SpeakerKind};
 use litrpg_daemon::config::{Config, StoryConfig};
 use litrpg_daemon::{AppState, router};
 use litrpg_store::{NewChapter, Store};
+use litrpg_tts::backend::{Availability, RenderRequest, TtsBackend, VoiceDesc};
+use litrpg_tts::pcm::Pcm16k;
+use litrpg_tts::sherpa::SherpaConfig;
+use litrpg_tts::{TtsError, TtsRegistry, async_trait};
 use tempfile::TempDir;
 use tower::ServiceExt;
+
+/// A `TtsBackend` with a fixed id, availability and voice list.
+///
+/// Defined here rather than in `litrpg-tts` because that crate belongs to another
+/// agent. `/api/voices` only ever reads `id`/`available`/`voices`, so `render` is
+/// unreachable for these tests and returns an error rather than fabricating audio —
+/// a stub that silently produced PCM could let a real bug pass.
+pub struct StubBackend {
+    id: String,
+    availability: Availability,
+    voices: Vec<VoiceDesc>,
+}
+
+impl StubBackend {
+    pub fn new(id: &str, availability: Availability, voices: Vec<VoiceDesc>) -> Self {
+        Self {
+            id: id.to_string(),
+            availability,
+            voices,
+        }
+    }
+}
+
+#[async_trait]
+impl TtsBackend for StubBackend {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn available(&self) -> Availability {
+        self.availability.clone()
+    }
+
+    fn voices(&self) -> Vec<VoiceDesc> {
+        self.voices.clone()
+    }
+
+    async fn render(&self, _req: &RenderRequest) -> Result<Pcm16k, TtsError> {
+        Err(TtsError::BackendUnavailable {
+            id: self.id.clone(),
+            reason: "StubBackend does not synthesize".to_string(),
+        })
+    }
+}
 
 /// Chapter 1's synthetic duration. Three 1000 ms segments.
 pub const CH1_DURATION_MS: u32 = 3000;
@@ -110,8 +158,11 @@ pub fn fixture() -> Fixture {
     // would otherwise pass.
     let pcm: Vec<u8> = (0..CH1_PCM_LEN).map(|i| (i % 256) as u8).collect();
     std::fs::write(media.path().join("0001.pcm"), &pcm).expect("write pcm");
-    std::fs::write(media.path().join("0001.mp3"), vec![0xFFu8; CH1_MP3_LEN as usize])
-        .expect("write mp3");
+    std::fs::write(
+        media.path().join("0001.mp3"),
+        vec![0xFFu8; CH1_MP3_LEN as usize],
+    )
+    .expect("write mp3");
 
     let cfg = Config::new(
         "127.0.0.1:8093".parse::<SocketAddr>().unwrap(),
@@ -129,12 +180,15 @@ pub fn fixture() -> Fixture {
     Fixture { app, _media: media }
 }
 
-/// A store with ledger entries, for the state/character routes.
-pub fn fixture_with_ledger() -> Fixture {
+/// An in-memory store seeded with one fully-described character.
+///
+/// Shared by `fixture_with_ledger` and `fixture_with_protagonist` so the two cannot
+/// drift — a `/api/character/Kael` test and a `/api/character` test must agree about
+/// what Kael looks like or neither proves anything.
+pub fn seed_ledger_store() -> Store {
     use litrpg_core::ledger::Op;
     use litrpg_core::validate::Delta;
 
-    let media = TempDir::new().expect("temp media dir");
     let store = Store::open_in_memory().expect("store");
 
     // Establishes "Kael" as a known subject; the gate rejects deltas for unknown ones.
@@ -164,9 +218,19 @@ pub fn fixture_with_ledger() -> Fixture {
         d("appear:hair", Op::Set, None, Some("black, cropped")),
     ] {
         let verdict = store.append_delta(1, &delta).expect("append");
-        assert!(verdict.is_ok(), "delta {:?} rejected: {verdict:?}", delta.field);
+        assert!(
+            verdict.is_ok(),
+            "delta {:?} rejected: {verdict:?}",
+            delta.field
+        );
     }
 
+    store
+}
+
+/// A store with ledger entries, for the state/character routes.
+pub fn fixture_with_ledger() -> Fixture {
+    let media = TempDir::new().expect("temp media dir");
     let cfg = Config::new(
         "127.0.0.1:8093".parse::<SocketAddr>().unwrap(),
         media.path(),
@@ -176,7 +240,69 @@ pub fn fixture_with_ledger() -> Fixture {
         ..StoryConfig::default()
     });
 
+    let app = router(Arc::new(AppState::new(seed_ledger_store(), cfg)));
+    Fixture { app, _media: media }
+}
+
+/// Fixture with a caller-supplied TTS registry and sherpa config, for `/api/voices`.
+pub fn fixture_with_voices(registry: TtsRegistry, sherpa: SherpaConfig) -> Fixture {
+    let media = TempDir::new().expect("temp media dir");
+    let store = Store::open_in_memory().expect("store");
+    let cfg = Config::new(
+        "127.0.0.1:8093".parse::<SocketAddr>().unwrap(),
+        media.path(),
+    );
+    let app = router(Arc::new(
+        AppState::new(store, cfg)
+            .with_tts(registry)
+            .with_sherpa(sherpa),
+    ));
+    Fixture { app, _media: media }
+}
+
+/// Fixture with a ledger plus a **`story` table row**, for testing that the store
+/// outranks config. `config_protagonist` is the fallback that must lose.
+pub fn fixture_with_story_row(story_protagonist: &str, config_protagonist: &str) -> Fixture {
+    let media = TempDir::new().expect("temp media dir");
+    let store = seed_ledger_store();
+    store
+        .upsert_story(&litrpg_store::NewStory {
+            title: "The Sunken Vale".to_string(),
+            protagonist: story_protagonist.to_string(),
+            prompt_path: "story/prompt.md".to_string(),
+            prompt_hash: "storyhash1".to_string(),
+            target_words: 2500,
+        })
+        .expect("upsert story");
+
+    let cfg = Config::new(
+        "127.0.0.1:8093".parse::<SocketAddr>().unwrap(),
+        media.path(),
+    )
+    .with_story(StoryConfig {
+        title: "Config Title (must lose)".to_string(),
+        protagonist: config_protagonist.to_string(),
+        ..StoryConfig::default()
+    });
+
     let app = router(Arc::new(AppState::new(store, cfg)));
+    Fixture { app, _media: media }
+}
+
+/// Fixture with a ledger and an explicit configured protagonist, for `/api/character`.
+///
+/// Pass `""` to model a daemon that was never told whose story this is.
+pub fn fixture_with_protagonist(protagonist: &str) -> Fixture {
+    let media = TempDir::new().expect("temp media dir");
+    let cfg = Config::new(
+        "127.0.0.1:8093".parse::<SocketAddr>().unwrap(),
+        media.path(),
+    )
+    .with_story(StoryConfig {
+        protagonist: protagonist.to_string(),
+        ..StoryConfig::default()
+    });
+    let app = router(Arc::new(AppState::new(seed_ledger_store(), cfg)));
     Fixture { app, _media: media }
 }
 
@@ -211,7 +337,11 @@ impl Fixture {
     }
 
     pub async fn request(&self, req: Request<Body>) -> Response<Body> {
-        self.app.clone().oneshot(req).await.expect("router response")
+        self.app
+            .clone()
+            .oneshot(req)
+            .await
+            .expect("router response")
     }
 }
 

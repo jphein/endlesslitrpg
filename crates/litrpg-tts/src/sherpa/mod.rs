@@ -37,7 +37,7 @@ use std::path::PathBuf;
 #[cfg(feature = "sherpa")]
 mod engine;
 #[cfg(feature = "sherpa")]
-pub use engine::SherpaBackend;
+pub use engine::{NativeRender, SherpaBackend};
 
 /// Which sherpa model family a directory holds. They take different config
 /// structs but the same `(text, sid, speed)` synthesis call.
@@ -146,7 +146,11 @@ fn default_speed() -> f32 {
     1.0
 }
 fn default_narrator() -> String {
-    "piper-en_GB-cori:0".to_string()
+    // cori-**high**, not medium. At 7.55x RTF it is faster than Kokoro (5.28x), so
+    // the narrator — the largest share of any chapter — gets the better variant
+    // without becoming the bottleneck: ~103 s for a 13-minute narration. Pin
+    // `piper-en_GB-cori:0` (25.03x) instead when a fast preview matters more.
+    "piper-en_GB-cori-high:0".to_string()
 }
 fn default_system_voice() -> String {
     // The neutral speaker Reverie actually coloured in the mixed-model stitch.
@@ -181,6 +185,13 @@ pub struct SherpaConfig {
     /// Kept as an explicit `false` rather than an absence: Reverie measured that
     /// sharding a pool by model is the wrong topology.
     pub shard_by_model: bool,
+    /// Kokoro lexicon filenames, in load order, relative to the model directory.
+    ///
+    /// Exactly **one** English lexicon — see [`SherpaConfig::kokoro_lexicons`].
+    /// Defaults to the pairing upstream ships and Reverie benchmarked
+    /// (`us-en` + `zh`). Swap `lexicon-us-en.txt` for `lexicon-gb-en.txt` if the
+    /// cast is predominantly British.
+    pub kokoro_lexicon_files: Vec<String>,
     models: Vec<ModelDesc>,
     voices: Vec<SherpaVoice>,
 }
@@ -196,10 +207,18 @@ impl Default for SherpaConfig {
             narrator: default_narrator(),
             system_voice: default_system_voice(),
             shard_by_model: false,
+            kokoro_lexicon_files: default_kokoro_lexicons(),
             models: default_models(),
             voices: default_voices(),
         }
     }
+}
+
+fn default_kokoro_lexicons() -> Vec<String> {
+    vec![
+        "lexicon-us-en.txt".to_string(),
+        "lexicon-zh.txt".to_string(),
+    ]
 }
 
 impl SherpaConfig {
@@ -284,8 +303,73 @@ impl SherpaConfig {
         Ok((sel, model))
     }
 
-    /// Whether the plugin can run: model root present, at least one configured
-    /// model directory present, and `ffmpeg` runnable for the resample.
+    /// Every asset a model **must** have before `sherpa-rs` is handed its config.
+    ///
+    /// This list is a safety mechanism, not documentation. sherpa-onnx validates
+    /// some of these by calling **`exit()`** rather than returning an error (see
+    /// [`SherpaConfig::preflight`]), so anything on this list is checked in Rust —
+    /// where a missing file becomes a catchable [`TtsError::ModelMissing`] — before
+    /// the C++ ever sees it.
+    pub fn required_assets(&self, m: &ModelDesc) -> Vec<PathBuf> {
+        let dir = self.model_dir(m);
+        let mut out = vec![dir.join("tokens.txt"), dir.join("espeak-ng-data")];
+        match m.family {
+            ModelFamily::Piper => {}
+            ModelFamily::Kokoro => {
+                out.push(dir.join("voices.bin"));
+                // Required by the core sherpa-rs 0.6.8 bundles; merely deprecated
+                // by newer ones. Absence is fatal, not degrading.
+                out.push(dir.join("dict"));
+                // At least one lexicon must resolve; the first configured one
+                // stands in for the list.
+                if let Some(first) = self.kokoro_lexicon_files.first() {
+                    out.push(dir.join(first));
+                }
+            }
+        }
+        out
+    }
+
+    /// Stat-check the required assets of every **installed** model.
+    ///
+    /// Returns `(model_id, missing_path)` for each gap. A model whose directory is
+    /// absent entirely is *not* reported — that model simply is not installed. What
+    /// is reported is a model that is present but **incomplete**, which is the
+    /// dangerous state: sherpa-onnx aborts the process on some missing assets
+    /// instead of returning an error, so a half-installed model is a loaded gun
+    /// pointed at whatever chapter first references it.
+    ///
+    /// The daemon should call this at startup so the model set is validated by a
+    /// handful of `stat` calls rather than discovered mid-chapter.
+    pub fn preflight(&self) -> Vec<(String, PathBuf)> {
+        let mut issues = Vec::new();
+        for m in &self.models {
+            if !self.model_dir(m).is_dir() {
+                continue; // not installed; not a fault
+            }
+            if self.onnx_path(m).is_err() {
+                issues.push((m.id.clone(), self.model_dir(m).join("*.onnx")));
+            }
+            for asset in self.required_assets(m) {
+                if !asset.exists() {
+                    issues.push((m.id.clone(), asset));
+                }
+            }
+        }
+        issues
+    }
+
+    /// Models that are installed and complete — the ones actually safe to load.
+    pub fn ready_models(&self) -> Vec<&ModelDesc> {
+        let broken: Vec<String> = self.preflight().into_iter().map(|(id, _)| id).collect();
+        self.models
+            .iter()
+            .filter(|m| self.model_dir(m).is_dir() && !broken.contains(&m.id))
+            .collect()
+    }
+
+    /// Whether the plugin can run: model root present, at least one **complete**
+    /// model, no half-installed models, and `ffmpeg` runnable for the resample.
     ///
     /// The reason string always names the offending path — an unavailable backend
     /// is only actionable if it says what to install where.
@@ -296,14 +380,31 @@ impl SherpaConfig {
                 self.model_root.display()
             ));
         }
-        let present: Vec<&ModelDesc> = self
-            .models
-            .iter()
-            .filter(|m| self.model_dir(m).is_dir())
-            .collect();
-        if present.is_empty() {
+        if !self.models.iter().any(|m| self.model_dir(m).is_dir()) {
             return Availability::missing(format!(
                 "no configured model directories under {}",
+                self.model_root.display()
+            ));
+        }
+        // A present-but-incomplete model is reported as unavailable even when
+        // another model is fine: assigning a voice to the broken one would abort
+        // the process, and that is not a failure the engine can degrade from.
+        let issues = self.preflight();
+        if !issues.is_empty() {
+            let detail = issues
+                .iter()
+                .take(4)
+                .map(|(id, p)| format!("{id} missing {}", p.display()))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Availability::missing(format!(
+                "{} incomplete sherpa model asset(s): {detail}",
+                issues.len()
+            ));
+        }
+        if self.ready_models().is_empty() {
+            return Availability::missing(format!(
+                "no complete model under {}",
                 self.model_root.display()
             ));
         }
@@ -376,27 +477,29 @@ impl SherpaConfig {
         }
     }
 
-    /// Kokoro's comma-joined lexicon list.
+    /// Kokoro's comma-joined lexicon list, as absolute paths.
     ///
     /// **Absolute paths only** — Reverie found relative entries resolve against
     /// the process CWD, not the model directory, which silently degrades
     /// pronunciation instead of failing.
+    ///
+    /// **This is an explicit list, deliberately not a glob.** `kokoro-multi-lang-v1_0`
+    /// ships `lexicon-gb-en.txt`, `lexicon-us-en.txt` and `lexicon-zh.txt`, and
+    /// sherpa's Kokoro lexicon is keyed by word with no language dimension — so
+    /// loading both English files logs `Duplicated word: … Ignore it.` for every
+    /// shared word and silently keeps whichever loaded first. Globbing sorted
+    /// filenames put `gb-en` first, which would have given the American voices
+    /// (`af_*`/`am_*`) British phonemes. Missing files are skipped, so a slimmed
+    /// model directory still works.
     pub fn kokoro_lexicons(&self, m: &ModelDesc) -> String {
         let dir = self.model_dir(m);
-        let mut out: Vec<String> = Vec::new();
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            let mut paths: Vec<PathBuf> = entries
-                .filter_map(|e| e.ok().map(|e| e.path()))
-                .filter(|p| {
-                    p.file_name()
-                        .and_then(|n| n.to_str())
-                        .is_some_and(|n| n.starts_with("lexicon") && n.ends_with(".txt"))
-                })
-                .collect();
-            paths.sort();
-            out = paths.iter().map(|p| p.display().to_string()).collect();
-        }
-        out.join(",")
+        self.kokoro_lexicon_files
+            .iter()
+            .map(|f| dir.join(f))
+            .filter(|p| p.is_file())
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(",")
     }
 }
 
@@ -478,26 +581,32 @@ fn default_voices() -> Vec<SherpaVoice> {
 
     let mut out = vec![
         SherpaVoice {
-            voice: "piper-en_GB-cori:0".into(),
-            // Reverie flagged this: cori is female, trained on 24 h of LibriVox
-            // audiobook narration.
-            label: "cori (narrator, en_GB female)".into(),
+            // The default narrator. Single-speaker, so sid 0 is the only legal one.
+            voice: "piper-en_GB-cori-high:0".into(),
+            // cori is **UK English female**, trained on ~24 h of public-domain
+            // LibriVox audiobook narration — ideal provenance, and labelled here so
+            // a male-narrator assumption cannot be discovered late.
+            label: "cori-high (narrator, en_GB female)".into(),
             lang: "en-GB".into(),
             gender: Gender::Female,
         },
         SherpaVoice {
-            voice: "piper-en_GB-cori-high:0".into(),
-            label: "cori-high (narrator, best quality)".into(),
+            voice: "piper-en_GB-cori:0".into(),
+            label: "cori-medium (narrator, fast preview, en_GB female)".into(),
             lang: "en-GB".into(),
             gender: Gender::Female,
         },
     ];
-    out.extend(KOKORO_EN.iter().map(|(sid, name, lang, gender)| SherpaVoice {
-        voice: format!("kokoro-multi-lang-v1_0:{sid}"),
-        label: (*name).to_string(),
-        lang: (*lang).to_string(),
-        gender: *gender,
-    }));
+    out.extend(
+        KOKORO_EN
+            .iter()
+            .map(|(sid, name, lang, gender)| SherpaVoice {
+                voice: format!("kokoro-multi-lang-v1_0:{sid}"),
+                label: (*name).to_string(),
+                lang: (*lang).to_string(),
+                gender: *gender,
+            }),
+    );
     out
 }
 

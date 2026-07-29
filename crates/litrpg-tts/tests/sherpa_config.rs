@@ -39,7 +39,10 @@ fn a_non_numeric_sid_is_a_typed_error_not_a_silent_zero() {
     match VoiceSel::parse("kokoro-multi-lang-v1_0:bm_george") {
         Err(TtsError::UnknownVoice { voice, reason, .. }) => {
             assert!(voice.contains("bm_george"));
-            assert!(reason.contains("sid"), "reason should name the sid: {reason}");
+            assert!(
+                reason.contains("sid"),
+                "reason should name the sid: {reason}"
+            );
         }
         other => panic!("expected UnknownVoice, got {other:?}"),
     }
@@ -69,16 +72,61 @@ fn the_full_voice_ref_is_parsed_through_the_backend_id_first() {
 // ---------------------------------------------------------------- default cast
 
 #[test]
-fn the_default_narrator_is_piper_cori_at_sid_zero() {
+fn the_default_narrator_is_cori_high_at_sid_zero() {
+    // cori-high runs at 7.55x RTF — faster than Kokoro's 5.28x — so the narrator,
+    // the largest share of any chapter, can use the better variant without
+    // becoming the bottleneck (~103 s for a 13-minute narration).
     let cfg = SherpaConfig::default();
     let narrator = cfg.narrator_voice_ref();
-    assert_eq!(narrator, "sherpa:piper-en_GB-cori:0");
+    assert_eq!(narrator, "sherpa:piper-en_GB-cori-high:0");
 
     let v = VoiceSel::parse(narrator.strip_prefix("sherpa:").unwrap()).unwrap();
-    let model = cfg.model(&v.model_id).expect("cori model must be configured");
+    assert_eq!(v.sid, 0, "cori is single-speaker: sid 0 only");
+    let model = cfg
+        .model(&v.model_id)
+        .expect("cori model must be configured");
     assert_eq!(model.family, ModelFamily::Piper);
-    assert_eq!(model.native_rate, 22_050, "Piper emits 22.05 kHz");
-    assert_eq!(model.speakers, 1, "cori is single-speaker");
+    assert_eq!(
+        model.native_rate, 22_050,
+        "both cori variants are 22.05 kHz"
+    );
+    assert_eq!(model.speakers, 1);
+}
+
+#[test]
+fn both_cori_variants_are_configured_and_only_medium_and_high_exist() {
+    // `-low` does not exist upstream (404), so it must not be in the table.
+    let cfg = SherpaConfig::default();
+    let medium = cfg.model("piper-en_GB-cori").expect("cori-medium");
+    let high = cfg.model("piper-en_GB-cori-high").expect("cori-high");
+    assert_eq!(medium.dir, "vits-piper-en_GB-cori-medium");
+    assert_eq!(high.dir, "vits-piper-en_GB-cori-high");
+    for m in [medium, high] {
+        assert_eq!(m.native_rate, 22_050);
+        assert_eq!(m.speakers, 1);
+    }
+    assert!(
+        cfg.models().iter().all(|m| !m.dir.contains("cori-low")),
+        "cori-low does not exist upstream"
+    );
+}
+
+#[test]
+fn cori_is_labelled_as_uk_english_female() {
+    // Flagged so a male-narrator assumption cannot be discovered late.
+    let cfg = SherpaConfig::default();
+    for id in ["piper-en_GB-cori:0", "piper-en_GB-cori-high:0"] {
+        let v = cfg.voices().iter().find(|v| v.voice == id).unwrap();
+        assert_eq!(v.lang, "en-GB");
+        assert_eq!(v.gender, litrpg_tts::Gender::Female);
+    }
+}
+
+#[test]
+fn the_narrator_can_be_pinned_to_cori_medium_for_faster_renders() {
+    // 25.03x vs 7.55x RTF, when a preview matters more than quality.
+    let cfg = SherpaConfig::from_json_str(r#"{"narrator": "piper-en_GB-cori:0"}"#).unwrap();
+    assert_eq!(cfg.narrator_voice_ref(), "sherpa:piper-en_GB-cori:0");
 }
 
 #[test]
@@ -169,7 +217,11 @@ fn advertised_voice_refs_are_fully_qualified_and_free() {
             "not fully qualified: {}",
             d.voice_ref
         );
-        assert_eq!(d.cost_class, CostClass::Free, "local inference is unmetered");
+        assert_eq!(
+            d.cost_class,
+            CostClass::Free,
+            "local inference is unmetered"
+        );
     }
 }
 
@@ -221,7 +273,11 @@ fn the_system_kind_selects_the_ffmpeg_colouring_stage() {
 #[test]
 fn every_kind_is_loudness_normalized() {
     // The 4.1 LU spread across engines is audible at joins; normalize always.
-    for k in [SpeakerKind::Narrator, SpeakerKind::Character, SpeakerKind::System] {
+    for k in [
+        SpeakerKind::Narrator,
+        SpeakerKind::Character,
+        SpeakerKind::System,
+    ] {
         assert!(PostProcess::for_kind(k).loudnorm, "{k:?} not normalized");
     }
 }
@@ -229,10 +285,7 @@ fn every_kind_is_loudness_normalized() {
 #[test]
 fn the_default_system_speaker_is_a_neutral_configured_voice() {
     let cfg = SherpaConfig::default();
-    let sel = VoiceSel::parse(
-        cfg.system_voice_ref().strip_prefix("sherpa:").unwrap(),
-    )
-    .unwrap();
+    let sel = VoiceSel::parse(cfg.system_voice_ref().strip_prefix("sherpa:").unwrap()).unwrap();
     assert!(cfg.model(&sel.model_id).is_some());
 }
 
@@ -250,7 +303,11 @@ fn sharding_is_round_robin_over_segments_and_covers_every_index_once() {
 
     let mut all: Vec<usize> = buckets.into_iter().flatten().collect();
     all.sort_unstable();
-    assert_eq!(all, (0..10).collect::<Vec<_>>(), "no segment lost or doubled");
+    assert_eq!(
+        all,
+        (0..10).collect::<Vec<_>>(),
+        "no segment lost or doubled"
+    );
 }
 
 #[test]
@@ -261,7 +318,10 @@ fn sharding_never_creates_idle_workers_or_panics_on_small_batches() {
     assert_eq!(shard(0, 4).len(), 1);
     assert!(shard(0, 4)[0].is_empty());
     assert_eq!(shard(5, 1), vec![vec![0, 1, 2, 3, 4]]);
-    assert!(!shard(5, 0).is_empty(), "worker count is clamped, never zero");
+    assert!(
+        !shard(5, 0).is_empty(),
+        "worker count is clamped, never zero"
+    );
 }
 
 #[test]
@@ -274,6 +334,55 @@ fn round_robin_spreads_clustered_work_rather_than_chunking_it() {
         assert_eq!(b.len(), 2, "even split");
         assert_eq!(b[1] - b[0], 4, "each worker gets non-adjacent segments");
     }
+}
+
+// ------------------------------------------------------------ kokoro lexicons
+
+#[test]
+fn exactly_one_english_kokoro_lexicon_is_configured() {
+    // sherpa's Kokoro lexicon is keyed by word with no language dimension, so
+    // loading both lexicon-gb-en.txt and lexicon-us-en.txt logs
+    // "Duplicated word: ... Ignore it." for every shared word and silently keeps
+    // whichever loaded first. Globbing sorted filenames put gb-en first, which gave
+    // the American voices British phonemes. Observed live 2026-07-29.
+    let files = SherpaConfig::default().kokoro_lexicon_files.clone();
+    let english: Vec<&String> = files.iter().filter(|f| f.contains("-en.")).collect();
+    assert_eq!(
+        english.len(),
+        1,
+        "exactly one English lexicon, got {english:?}"
+    );
+    assert_eq!(english[0], "lexicon-us-en.txt", "the benchmarked pairing");
+    assert!(
+        files.iter().any(|f| f == "lexicon-zh.txt"),
+        "the multi-lang model wants its zh lexicon too"
+    );
+}
+
+#[test]
+fn the_lexicon_list_is_order_preserving_and_overridable() {
+    // Load order decides which duplicate wins, so it must not be re-sorted.
+    let json = r#"{"kokoro_lexicon_files": ["lexicon-gb-en.txt", "lexicon-zh.txt"]}"#;
+    let cfg = SherpaConfig::from_json_str(json).unwrap();
+    assert_eq!(
+        cfg.kokoro_lexicon_files,
+        vec!["lexicon-gb-en.txt", "lexicon-zh.txt"],
+        "a British-majority cast can swap the English lexicon in config"
+    );
+}
+
+#[test]
+fn absent_lexicon_files_are_skipped_rather_than_passed_as_bad_paths() {
+    // Relative entries resolve against the process CWD, not the model dir, so a
+    // non-existent path must never reach sherpa.
+    let json = r#"{"model_root": "/definitely/not/here"}"#;
+    let cfg = SherpaConfig::from_json_str(json).unwrap();
+    let m = cfg.model("kokoro-multi-lang-v1_0").unwrap();
+    assert_eq!(
+        cfg.kokoro_lexicons(m),
+        "",
+        "missing files must drop out, not produce dangling paths"
+    );
 }
 
 // --------------------------------------------------------------- model paths

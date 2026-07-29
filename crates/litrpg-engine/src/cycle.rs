@@ -392,7 +392,7 @@ where
             );
         }
 
-        let title = derive_title(number, extraction.as_ref().map(|e| e.summary.as_str()));
+        let title = derive_title(number, extraction.as_ref().map(|e| e.title.as_str()));
         let text_md = chapter_markdown(number, &title, &planned);
 
         self.with_store(|s| {
@@ -725,11 +725,13 @@ fn strip_title(text_md: &str) -> String {
         .join("\n")
 }
 
-/// A chapter title derived from the extraction summary.
+/// The chapter title, from pass 2's `title` field.
 ///
-/// Deterministic and free. Asking the model for a title would be another round trip and
-/// another thing to fail; falling back to `Chapter N` keeps a `state_dirty` chapter
-/// perfectly serviceable.
+/// Measured 2026-07-29: deriving this from the *summary* produced
+/// `"No stat changes, inventory changes, or location changes are…"`, because a summary is
+/// written for a bookkeeping audience and sometimes describes the extraction rather than
+/// the story. A title is content, so the model that just read the chapter writes it.
+/// Falling back to `Chapter N` keeps a `state_dirty` chapter perfectly serviceable.
 pub fn derive_title(number: u32, summary: Option<&str>) -> String {
     let fallback = format!("Chapter {number}");
     let Some(s) = summary else { return fallback };

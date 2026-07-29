@@ -10,6 +10,7 @@ use sherpa_rs::OnnxConfig;
 use sherpa_rs::tts::{CommonTtsConfig, KokoroTts, KokoroTtsConfig, VitsTts, VitsTtsConfig};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 /// One loaded model. Both families expose the identical `(text, sid, speed)`
 /// primitive, which is why per-character casting is a config concern.
@@ -37,9 +38,14 @@ fn build_engine(cfg: &SherpaConfig, m: &ModelDesc) -> Result<Engine> {
         // core count regresses because of contention with qwen3-coder.
         num_threads: cfg.threads_per_worker,
     };
+    // ⚠️ Everything here is `asset()` (required, returns Err) rather than
+    // `optional_asset()` (returns ""), because sherpa-onnx validates several of
+    // these by calling **`exit()`** instead of returning an error. Checking in Rust
+    // converts an unkillable process abort into a catchable
+    // `TtsError::ModelMissing`. See `SherpaConfig::required_assets`.
     let model = as_str(&cfg.onnx_path(m)?);
     let tokens = as_str(&cfg.asset(m, "tokens.txt")?);
-    let data_dir = cfg.optional_asset(m, "espeak-ng-data");
+    let data_dir = as_str(&cfg.asset(m, "espeak-ng-data")?);
 
     // One sentence per synthesis call: segments are already sentence- or
     // paragraph-sized, and batching sentences inside a call costs the caller the
@@ -70,14 +76,35 @@ fn build_engine(cfg: &SherpaConfig, m: &ModelDesc) -> Result<Engine> {
             voices: as_str(&cfg.asset(m, "voices.bin")?),
             tokens,
             data_dir,
-            // `dict_dir` is **deprecated** for kokoro-multi-lang-v1_0 as of
-            // sherpa-onnx >= 1.12.15: passing it prints a stderr warning and is
-            // ignored. Upstream's own example still sets it; don't.
-            dict_dir: String::new(),
+            // ⚠️⚠️ **Do not "fix" this to an empty string.** Reverie's Python spike
+            // (sherpa-onnx 1.13.4) found `dict_dir` deprecated-and-ignored for
+            // kokoro-multi-lang-v1_0, so omitting it looked correct — and JP's
+            // VoxSherpa-TTS and upstream's own `tts_kokoro.rs` both still set it,
+            // which read as stale code but was actually the answer.
+            //
+            // The core bundled by sherpa-rs 0.6.8 is OLDER and **requires** it. With
+            // it empty, InitFrontend logs "please pass --kokoro-lexicon and
+            // --kokoro-dict-dir" and then **aborts the process (exit 255)** — not a
+            // recoverable Err, so nothing upstream can catch or degrade from it.
+            // Passing it is safe on both versions (newer ones warn and ignore), so
+            // it is always passed. `asset()` not `optional_asset()`: a missing dict/
+            // must be a catchable Err, never a silent empty string that reaches C++.
+            dict_dir: as_str(&cfg.asset(m, "dict")?),
             // Absolute, comma-joined — relative entries resolve against the
             // process CWD rather than the model directory and silently degrade
-            // pronunciation instead of failing.
-            lexicon: cfg.kokoro_lexicons(m),
+            // pronunciation instead of failing. An empty list is the other half of
+            // the "please pass --kokoro-lexicon" abort, so refuse it in Rust.
+            lexicon: {
+                let lex = cfg.kokoro_lexicons(m);
+                if lex.is_empty() {
+                    return Err(TtsError::ModelMissing(format!(
+                        "{}: none of {:?} found; an empty Kokoro lexicon list aborts sherpa-onnx",
+                        cfg.model_dir(m).display(),
+                        cfg.kokoro_lexicon_files
+                    )));
+                }
+                lex
+            },
             length_scale: 1.0,
             onnx_config: onnx,
             common_config: common,
@@ -111,29 +138,96 @@ impl Worker {
             .expect("just inserted this model's engine"))
     }
 
-    fn render(&mut self, req: &RenderRequest) -> Result<Pcm16k> {
-        if req.is_blank() {
-            return Ok(Pcm16k::empty());
-        }
+    /// Synthesis only — no resample, no colouring, no normalization. Returns the
+    /// engine's own reported rate and the wall time of inference alone, which is
+    /// what an honest RTF figure needs.
+    fn synthesize(&mut self, remainder: &str, text: &str) -> Result<NativeRender> {
         let cfg = Arc::clone(&self.cfg);
-        let (sel, model) = cfg.resolve(req.voice_remainder())?;
+        let (sel, model) = cfg.resolve(remainder)?;
         let model = model.clone();
-        let (samples, reported_rate) =
-            self.engine(&model)?
-                .create(&req.text, sel.sid, cfg.speed)?;
 
-        // Trust the rate the engine reports over the configured one — a model
-        // swap in the config table shouldn't be able to cause a pitch shift.
-        let native_rate = if reported_rate == 0 {
+        // Build (or fetch) the engine *outside* the timed region: a model load is
+        // ~1.5 s for cori-high and would otherwise be charged to the first
+        // segment's synthesis, making a cold RTF look ~12x worse than it is.
+        let engine = self.engine(&model)?;
+        let started = Instant::now();
+        let (samples, reported_rate) = engine.create(text, sel.sid, cfg.speed)?;
+        let synth_wall = started.elapsed();
+
+        // Trust the rate the engine reports over the configured one — a model swap
+        // in the config table shouldn't be able to cause a pitch shift.
+        let sample_rate = if reported_rate == 0 {
             model.native_rate
         } else {
             reported_rate
         };
 
+        Ok(NativeRender {
+            model_id: model.id,
+            sid: sel.sid,
+            samples,
+            sample_rate,
+            synth_wall,
+        })
+    }
+
+    fn render(&mut self, req: &RenderRequest) -> Result<Pcm16k> {
+        if req.is_blank() {
+            return Ok(Pcm16k::empty());
+        }
+        let native = self.synthesize(req.voice_remainder(), &req.text)?;
+
         // Resample to the 16 kHz boundary contract, colour SYSTEM blocks, and
         // loudness-normalize — one ffmpeg pass, <2% of synthesis cost.
-        self.post
-            .process(&samples, native_rate, PostProcess::for_kind(req.kind))
+        self.post.process(
+            &native.samples,
+            native.sample_rate,
+            PostProcess::for_kind(req.kind),
+        )
+    }
+}
+
+/// Raw synthesis output, before the 16 kHz boundary contract is applied.
+///
+/// Exists because `sherpa-rs` 0.6.8 exposes a model's sample rate **only** on a
+/// generated `TtsAudio` — there is no `num_speakers()` or `sample_rate()` accessor
+/// on the TTS handle. So the only way to confirm from Rust that cori really is
+/// 22 050 Hz is to generate and look, which is what this returns.
+#[derive(Debug, Clone)]
+pub struct NativeRender {
+    pub model_id: String,
+    pub sid: i32,
+    pub samples: Vec<f32>,
+    /// The rate the **engine** reported, not the one the config table claims.
+    pub sample_rate: u32,
+    /// Inference only — excludes ffmpeg resample, colouring and normalization.
+    pub synth_wall: Duration,
+}
+
+impl NativeRender {
+    pub fn audio_secs(&self) -> f64 {
+        if self.sample_rate == 0 {
+            return 0.0;
+        }
+        self.samples.len() as f64 / self.sample_rate as f64
+    }
+
+    /// Seconds of audio produced per second of wall clock. Higher is better.
+    pub fn rtf(&self) -> f64 {
+        let wall = self.synth_wall.as_secs_f64();
+        if wall == 0.0 {
+            return f64::INFINITY;
+        }
+        self.audio_secs() / wall
+    }
+
+    /// Peak absolute amplitude as an i16, for "is this actually audio" checks.
+    pub fn peak_i16(&self) -> u16 {
+        self.samples
+            .iter()
+            .map(|s| (s.abs().min(1.0) * 32_767.0) as u16)
+            .max()
+            .unwrap_or(0)
     }
 }
 
@@ -195,6 +289,26 @@ impl SherpaBackend {
     pub fn workers(&self) -> usize {
         self.workers.len()
     }
+
+    /// **Diagnostic only.** Synthesize without post-processing and report the
+    /// engine's own sample rate plus inference-only wall time.
+    ///
+    /// Added purely so the live verification suite can confirm native rates and
+    /// measure RTF from Rust — `sherpa-rs` 0.6.8 has no `sample_rate()` or
+    /// `num_speakers()` accessor on a TTS handle, so generating is the only way to
+    /// observe either. The render path does not use this; it is not a second
+    /// pipeline.
+    pub async fn probe(&self, voice_remainder: &str, text: &str) -> Result<NativeRender> {
+        let worker = Arc::clone(&self.workers[0]);
+        let remainder = voice_remainder.to_string();
+        let text = text.to_string();
+        tokio::task::spawn_blocking(move || {
+            let mut w = worker.lock().unwrap_or_else(|e| e.into_inner());
+            w.synthesize(&remainder, &text)
+        })
+        .await
+        .map_err(|e| TtsError::Worker(e.to_string()))?
+    }
 }
 
 #[async_trait]
@@ -236,7 +350,10 @@ impl TtsBackend for SherpaBackend {
         }
 
         let mut set = tokio::task::JoinSet::new();
-        for (wi, positions) in shard(reqs.len(), self.workers.len()).into_iter().enumerate() {
+        for (wi, positions) in shard(reqs.len(), self.workers.len())
+            .into_iter()
+            .enumerate()
+        {
             if positions.is_empty() {
                 continue;
             }

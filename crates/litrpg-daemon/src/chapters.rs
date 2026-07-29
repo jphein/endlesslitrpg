@@ -22,31 +22,59 @@ pub struct StoryResponse {
     pub dirty_chapters: Vec<u32>,
     pub sample_rate: u32,
     pub bytes_per_ms: u32,
+    /// From the `story` table; `None` before `litrpg init` has written a row.
+    pub target_words: Option<u32>,
+    pub prompt_hash: Option<String>,
+    /// `true` when a `story` row exists. Lets a client distinguish an initialised
+    /// deployment from one still serving configured placeholders.
+    pub initialised: bool,
 }
 
 /// `GET /api/story`
 ///
-/// Counts come from the store; `title`/`protagonist` come from config, because the
-/// `story` table has no accessor in `litrpg-store` (see `config::StoryConfig`).
-/// `sample_rate`/`bytes_per_ms` are echoed from `litrpg-core` constants so a client
-/// never hardcodes the 32 B/ms figure its Range arithmetic depends on.
+/// `title` and `protagonist` come from the **`story` table** when a row exists, falling
+/// back to config otherwise. That order is deliberate: the table is the canonical
+/// record of what the story *is*, while config carries the bootstrap default used
+/// before `litrpg init` has run. `description`/`language` stay config-only — they are
+/// publishing concerns with no column.
+///
+/// `sample_rate`/`bytes_per_ms` are echoed from `litrpg-core` so a client never
+/// hardcodes the 32 B/ms figure its Range arithmetic depends on.
 pub async fn get_story(State(state): State<Arc<AppState>>) -> ApiResult<Json<StoryResponse>> {
     let store = state.store.lock().await;
     let latest = store.latest_number()?;
     let chapters = store.chapters_since(0)?;
     let dirty = store.dirty_chapters()?;
+    let story = store.story()?;
     drop(store);
 
+    let cfg = &state.config.story;
+    // A blank column is treated as absent so an empty `title` cannot shadow the
+    // configured fallback with an empty string.
+    let pick = |from_store: Option<&str>, fallback: &str| {
+        from_store
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(fallback)
+            .to_string()
+    };
+
     Ok(Json(StoryResponse {
-        title: state.config.story.title.clone(),
-        description: state.config.story.description.clone(),
-        protagonist: state.config.story.protagonist.clone(),
-        language: state.config.story.language.clone(),
+        title: pick(story.as_ref().map(|s| s.title.as_str()), &cfg.title),
+        description: cfg.description.clone(),
+        protagonist: pick(
+            story.as_ref().map(|s| s.protagonist.as_str()),
+            &cfg.protagonist,
+        ),
+        language: cfg.language.clone(),
         chapter_count: chapters.len(),
         latest_chapter: latest,
         dirty_chapters: dirty,
         sample_rate: litrpg_core::manifest::SAMPLE_RATE_HZ,
         bytes_per_ms: litrpg_core::manifest::BYTES_PER_MS,
+        target_words: story.as_ref().map(|s| s.target_words),
+        prompt_hash: story.as_ref().map(|s| s.prompt_hash.clone()),
+        initialised: story.is_some(),
     }))
 }
 
@@ -150,12 +178,8 @@ pub async fn get_chapter(
         duration_ms: row.duration_ms,
         has_audio: row.has_audio,
         state_dirty: row.state_dirty,
-        pcm_url: row
-            .has_audio
-            .then(|| format!("{base}/media/{n:04}.pcm")),
-        mp3_url: row
-            .has_audio
-            .then(|| format!("{base}/media/{n:04}.mp3")),
+        pcm_url: row.has_audio.then(|| format!("{base}/media/{n:04}.pcm")),
+        mp3_url: row.has_audio.then(|| format!("{base}/media/{n:04}.mp3")),
         manifest_contiguous: manifest.is_contiguous(),
         manifest,
     }))

@@ -29,7 +29,11 @@ fn ampersand_is_escaped_before_the_others_so_entities_are_not_double_escaped() {
 #[test]
 fn dialogue_punctuation_survives_the_round_trip_into_ssml() {
     // Apostrophes and quotes are guaranteed to appear in dialogue.
-    let ssml = build_ssml(&req(0, "azure:en-GB-Ada:DragonHDLatestNeural", "\"Don't,\" she said & left."));
+    let ssml = build_ssml(&req(
+        0,
+        "azure:en-GB-Ada:DragonHDLatestNeural",
+        "\"Don't,\" she said & left.",
+    ));
     assert!(
         ssml.contains("&quot;Don&apos;t,&quot; she said &amp; left."),
         "escaped body missing from: {ssml}"
@@ -41,7 +45,11 @@ fn dialogue_punctuation_survives_the_round_trip_into_ssml() {
 
 #[test]
 fn single_segment_ssml_is_well_formed_and_has_exactly_one_voice() {
-    let ssml = build_ssml(&req(0, "azure:en-GB-Ada:DragonHDLatestNeural", "The vale smelled of iron."));
+    let ssml = build_ssml(&req(
+        0,
+        "azure:en-GB-Ada:DragonHDLatestNeural",
+        "The vale smelled of iron.",
+    ));
     assert!(ssml.starts_with("<speak version=\"1.0\""));
     assert!(ssml.contains("xmlns=\"http://www.w3.org/2001/10/synthesis\""));
     assert!(ssml.ends_with("</speak>"));
@@ -192,7 +200,10 @@ fn debug_never_prints_the_key() {
         !dbg.contains("SUPER-SECRET"),
         "the key leaked into Debug output: {dbg}"
     );
-    assert!(dbg.contains("redacted"), "expected a redaction marker: {dbg}");
+    assert!(
+        dbg.contains("redacted"),
+        "expected a redaction marker: {dbg}"
+    );
     // Region and voice are not secret and should stay visible for diagnostics.
     assert!(dbg.contains("eastus"));
 }

@@ -127,10 +127,7 @@ pub async fn serve_media(
     }
     let total = meta.len();
 
-    let outcome = parse_range(
-        headers.get(RANGE).and_then(|v| v.to_str().ok()),
-        total,
-    );
+    let outcome = parse_range(headers.get(RANGE).and_then(|v| v.to_str().ok()), total);
 
     match outcome {
         // `Accept-Ranges` is advertised here too, not only on 206: a client that has

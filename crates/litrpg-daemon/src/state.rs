@@ -90,13 +90,54 @@ pub struct CharacterResponse {
     pub appearance: BTreeMap<String, Option<String>>,
 }
 
-/// `GET /api/character/{subject}`
+/// `GET /api/character` — the protagonist, so the watch's character screen (spec
+/// §9.4.1) need not already know whose story this is.
 ///
-/// The watch defaults `subject` to the protagonist, which it learns from
-/// `/api/story`'s `protagonist` field.
+/// Resolution order: the **`story` table's `protagonist` column**, then
+/// `config.story.protagonist`, then a `400`. The table wins because it is the canonical
+/// record of whose story this is; config is the bootstrap default for a deployment where
+/// `litrpg init` has not yet run.
+///
+/// An unresolved protagonist is a `400`, not an empty `200`: silently answering for the
+/// subject `""` would render a blank character screen that looks like a story with no
+/// protagonist rather than a daemon that was never told who it is.
+pub async fn get_protagonist(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<CharacterResponse>> {
+    let from_store = {
+        let store = state.store.lock().await;
+        store
+            .story()?
+            .map(|s| s.protagonist.trim().to_string())
+            .filter(|p| !p.is_empty())
+    };
+
+    let protagonist =
+        from_store.unwrap_or_else(|| state.config.story.protagonist.trim().to_string());
+
+    if protagonist.is_empty() {
+        return Err(crate::error::ApiError::BadRequest(
+            "no protagonist resolved: the story table has no row (run `litrpg init`) \
+             and no fallback is configured; set LITRPG_PROTAGONIST or request \
+             /api/character/{subject} explicitly"
+                .into(),
+        ));
+    }
+    character_for(&state, protagonist).await
+}
+
+/// `GET /api/character/{subject}`
 pub async fn get_character(
     State(state): State<Arc<AppState>>,
     Path(subject): Path<String>,
+) -> ApiResult<Json<CharacterResponse>> {
+    character_for(&state, subject).await
+}
+
+/// Shared body, so the protagonist route and the explicit route cannot drift.
+async fn character_for(
+    state: &Arc<AppState>,
+    subject: String,
 ) -> ApiResult<Json<CharacterResponse>> {
     let store = state.store.lock().await;
     let snap = store.snapshot()?;
@@ -121,12 +162,7 @@ pub async fn get_character(
     // Whitelist-driven, so every slot/trait is present even when unset.
     let equipment = EQUIP_SLOTS
         .iter()
-        .map(|slot| {
-            (
-                (*slot).to_string(),
-                txt(&format!("{EQUIP_PREFIX}{slot}")),
-            )
-        })
+        .map(|slot| ((*slot).to_string(), txt(&format!("{EQUIP_PREFIX}{slot}"))))
         .collect();
 
     let appearance = APPEAR_TRAITS

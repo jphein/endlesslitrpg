@@ -17,7 +17,9 @@ use serde::{Deserialize, Serialize};
 pub enum Availability {
     Ready,
     /// Present in the build but unusable, with a human-readable reason.
-    Missing { reason: String },
+    Missing {
+        reason: String,
+    },
 }
 
 impl Availability {
@@ -150,6 +152,11 @@ pub trait TtsBackend: Send + Sync {
     fn voices(&self) -> Vec<VoiceDesc>;
 
     /// Render one segment to 16 kHz mono s16le raw PCM.
+    ///
+    /// The returned buffer is **whole-millisecond aligned** ([`Pcm16k::is_whole_ms`]),
+    /// so `duration_ms() * 32 == len()` holds exactly and a manifest offset built
+    /// from it addresses the real audio. Both shipped plugins align at this
+    /// boundary rather than trusting the engine to remember.
     async fn render(&self, req: &RenderRequest) -> Result<Pcm16k, TtsError>;
 
     /// Render many segments, **one `Pcm16k` per request, in request order**.

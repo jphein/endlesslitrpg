@@ -111,9 +111,15 @@ impl Pcm16k {
     ///
     /// This is what makes a manifest's `start_byte = start_ms × 32` land on the
     /// real audio. Without it, segment *N*'s offset drifts by the accumulated
-    /// remainders of segments `0..N`. The pad is at most 31 bytes — under one
-    /// millisecond of silence, inaudible, and appended to the tail where every
-    /// engine already emits near-zero amplitude.
+    /// remainders of segments `0..N`.
+    ///
+    /// Because the length is always even, the pad is at most **30 bytes** — under
+    /// one millisecond of silence, inaudible, appended to the tail where every
+    /// engine already emits near-zero amplitude anyway.
+    ///
+    /// Every backend applies this before returning, so nothing crossing the plugin
+    /// boundary is ever misaligned. It stays public for callers assembling buffers
+    /// by hand.
     pub fn pad_to_whole_ms(&mut self) {
         let rem = self.remainder_bytes();
         if rem != 0 {
@@ -192,4 +198,83 @@ impl FromIterator<Pcm16k> for Pcm16k {
         }
         Pcm16k(out)
     }
+}
+
+/// Inter-segment silence, in milliseconds, by default: **none**.
+///
+/// Reverie measured joins as click-free without any padding (spike Part 2 §2.4) —
+/// join deltas of 6 and 1 against the stream's own p99.9 delta of ~3 595, because
+/// sherpa output already begins and ends at effectively zero amplitude. So a gap
+/// is a **narrative pacing** choice (a beat before a SYSTEM alert), not artifact
+/// suppression, and nobody gets one without asking.
+pub const DEFAULT_GAP_MS: u32 = 0;
+
+/// Where one segment landed in the assembled chapter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Span {
+    pub start_ms: u32,
+    pub end_ms: u32,
+}
+
+impl Span {
+    pub fn new(start_ms: u32, end_ms: u32) -> Self {
+        Self { start_ms, end_ms }
+    }
+
+    pub fn duration_ms(&self) -> u32 {
+        self.end_ms.saturating_sub(self.start_ms)
+    }
+
+    pub fn start_byte(&self) -> u64 {
+        self.start_ms as u64 * Pcm16k::BYTES_PER_MS as u64
+    }
+
+    pub fn end_byte(&self) -> u64 {
+        self.end_ms as u64 * Pcm16k::BYTES_PER_MS as u64
+    }
+}
+
+/// One chapter's audio plus where every segment landed in it.
+#[derive(Debug, Clone, Default)]
+pub struct Assembly {
+    pub pcm: Pcm16k,
+    /// One span per input segment, in order, contiguous, covering the whole stream.
+    pub spans: Vec<Span>,
+}
+
+/// Join processed segments into one chapter stream and **measure** where each
+/// landed.
+///
+/// Offsets are derived from the assembled bytes rather than predicted from them,
+/// which is the whole point: `loudnorm` has filter delay and changes stream length
+/// (Reverie's SYSTEM segment came out 104 B shorter than its input), so any
+/// pre-computed offset table is wrong. Feed this fully-processed segments and use
+/// the spans it returns.
+///
+/// Each part is aligned to a whole millisecond as it goes in, so
+/// `duration_ms() * 32 == len()` holds for the result no matter what the parts
+/// looked like.
+///
+/// `gap_ms` inserts silence **between** segments only — never before the first or
+/// after the last — and the gap is attributed to the span it *follows*. That keeps
+/// the spans contiguous (so the watch's `segment_at_ms` never returns `None`
+/// mid-chapter) and keeps the highlight on the sentence just spoken during the
+/// beat, rather than jumping early to one that has not started making sound.
+/// Pass [`DEFAULT_GAP_MS`] for none.
+pub fn assemble(parts: &[Pcm16k], gap_ms: u32) -> Assembly {
+    let gap = Pcm16k::silence_ms(gap_ms);
+    let mut pcm = Pcm16k::empty();
+    let mut spans = Vec::with_capacity(parts.len());
+
+    for (i, part) in parts.iter().enumerate() {
+        let start_ms = pcm.duration_ms();
+        pcm.extend(&part.clone().padded_to_whole_ms());
+        if i + 1 < parts.len() && gap_ms > 0 {
+            pcm.extend(&gap);
+        }
+        spans.push(Span::new(start_ms, pcm.duration_ms()));
+    }
+
+    debug_assert!(pcm.is_whole_ms());
+    Assembly { pcm, spans }
 }

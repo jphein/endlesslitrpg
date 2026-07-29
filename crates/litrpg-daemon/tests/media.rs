@@ -3,9 +3,7 @@
 mod common;
 
 use axum::http::StatusCode;
-use common::{
-    CH1_MP3_LEN, CH1_PCM_LEN, assert_status, body_bytes, fixture, header,
-};
+use common::{CH1_MP3_LEN, CH1_PCM_LEN, assert_status, body_bytes, fixture, header};
 
 /// The fixture writes `byte[i] = i % 256`, so this is the expected content at `start`.
 fn expected(start: u64, len: u64) -> Vec<u8> {

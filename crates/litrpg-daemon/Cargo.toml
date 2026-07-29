@@ -14,9 +14,22 @@ path = "src/lib.rs"
 name = "litrpg-daemon"
 path = "src/main.rs"
 
+[features]
+# Off by default, matching `litrpg-tts`: a plain build must not link sherpa-onnx.
+# Declared as a passthrough so `cfg!(feature = "sherpa")` in `voices.rs` is meaningful
+# — without it, that check would silently always be false and `/api/voices` could not
+# tell "not compiled in" from "no models on disk".
+default = []
+sherpa = ["litrpg-tts/sherpa"]
+
 [dependencies]
 litrpg-core = { workspace = true }
 litrpg-store = { workspace = true }
+litrpg-config = { workspace = true }
+# Default features on purpose — **no `sherpa`**. The voice catalog is config-derived
+# (`SherpaConfig` is always compiled; only the worker pool is behind the feature), so
+# `/api/voices` can advertise sherpa without this daemon linking native TTS libraries.
+litrpg-tts = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
 tower-http = { workspace = true, features = ["fs", "trace"] }

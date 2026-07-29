@@ -56,7 +56,8 @@ character_voices = [
   "sherpa:kokoro-multi-lang-v1_0:20",
   "sherpa:kokoro-multi-lang-v1_0:13",
   "sherpa:kokoro-multi-lang-v1_0:0",
-  "sherpa:kokoro-multi-lang-v1_0:24",
+  # sid 24 deliberately absent — it is the system_voice above, and the engine drops
+  # any character voice colliding with the narrator or SYSTEM.
   "sherpa:kokoro-multi-lang-v1_0:22",
   "sherpa:kokoro-multi-lang-v1_0:16",
   "sherpa:kokoro-multi-lang-v1_0:7",

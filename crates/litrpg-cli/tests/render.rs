@@ -475,8 +475,13 @@ fn a_backend_the_engine_lacks_is_reported_without_promising_restoration() {
     assert_eq!(r.missing_backends, vec!["sherpa".to_string()]);
 
     let out = render::render_text(&r);
+    // Symmetric: what it must say, then what it must not. The positive is the real
+    // guard — the negative below only pins one phrasing that was wrong once.
     assert!(out.contains("does not provide"), "{out}");
-    assert!(out.contains("substituted again"), "{out}");
+    assert!(
+        out.contains("substituted again on this engine"),
+        "must scope the claim to this engine, not to the resume path:\n{out}"
+    );
     assert!(
         !out.contains("restoring the original"),
         "must not promise a restoration this path cannot perform:\n{out}"
@@ -724,7 +729,11 @@ fn read_segments_shows_the_same_divergence() {
     assert_eq!(v.voice_divergence.len(), 1);
     let out = litrpg_cli::read::render_segments(&v);
     assert!(out.contains("disagree with the cast"), "{out}");
-    assert!(out.contains("change it to"), "{out}");
+    assert!(
+        out.contains("re-derive from the cast and change it to"),
+        "must state the direction of the change:\n{out}"
+    );
+    assert!(out.contains("azure:b:0 -> sherpa:a:0"), "{out}");
     assert!(
         !out.contains("will not change it"),
         "the inverted claim must be gone:\n{out}"

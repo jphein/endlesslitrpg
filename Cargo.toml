@@ -1,5 +1,10 @@
 [workspace]
-members = ["crates/litrpg-core", "crates/litrpg-store"]
+members = [
+    "crates/litrpg-core",
+    "crates/litrpg-store",
+    "crates/litrpg-ember",
+    "crates/litrpg-tts",
+]
 resolver = "3"
 
 [workspace.package]
@@ -7,11 +12,33 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.97"
 
+# Central version pins. Crates reference these with `{ workspace = true }` so no
+# crate ever needs to edit this file — important while several agents work in
+# parallel, each owning one directory under crates/.
 [workspace.dependencies]
 serde = { version = "1.0.229", default-features = false, features = ["derive", "alloc"] }
 serde_json = { version = "1.0.151", default-features = false, features = ["alloc"] }
 thiserror = "2.0.19"
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 proptest = "1.11.0"
+tokio = { version = "1.53.1", features = [
+    "rt-multi-thread",
+    "macros",
+    "process",
+    "fs",
+    "io-util",
+    "sync",
+    "time",
+] }
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls-tls"] }
+async-trait = "0.1.91"
+# Native TTS. Kept optional and off by default so a plain `cargo test` never
+# builds sherpa-onnx; enable with `--features sherpa`.
+sherpa-rs = { version = "0.6.8", features = ["tts", "download-binaries"] }
+axum = "0.8.9"
+tower-http = "0.7.0"
 
 litrpg-core = { path = "crates/litrpg-core" }
+litrpg-store = { path = "crates/litrpg-store" }
+litrpg-ember = { path = "crates/litrpg-ember" }
+litrpg-tts = { path = "crates/litrpg-tts" }

@@ -1,0 +1,25 @@
+[package]
+name = "litrpg-tts"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "TTS plugin registry with two first-class backends: sherpa-onnx (local) and Azure DragonHD"
+
+[dependencies]
+litrpg-core = { workspace = true }
+serde = { workspace = true, features = ["std"] }
+serde_json = { workspace = true, features = ["std"] }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+sherpa-rs = { workspace = true, optional = true }
+
+[features]
+# Off by default: a plain `cargo test` must not build sherpa-onnx native libs.
+default = []
+sherpa = ["dep:sherpa-rs"]
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

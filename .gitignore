@@ -1,0 +1,24 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock.orig
+
+# Story data — generated, not source
+/data/
+/media/
+*.db
+*.db-wal
+*.db-shm
+*.pcm
+*.mp3
+*.wav
+
+# TTS models — downloadable content, never repo content (~533 MB)
+/models/
+
+# Secrets — Azure key comes from ~/.config/speech-to-cli/config.json or Vaultwarden
+.env
+*.key
+
+# Scratch
+/scratch/

@@ -102,19 +102,48 @@ pub fn character_pool() -> Vec<String> {
 #[derive(Debug, Clone)]
 pub struct VoiceAssigner {
     narrator_voice: String,
+    system_voice: String,
     pool: Vec<String>,
 }
 
 impl VoiceAssigner {
+    /// The sherpa/Kokoro defaults.
     pub fn new(narrator_voice: String) -> Self {
+        Self::with_voices(narrator_voice, SYSTEM_VOICE.to_string(), character_pool())
+    }
+
+    /// Explicit voices, for a cast that is not sherpa-backed.
+    ///
+    /// This exists because a `voice_ref` names its backend (§7.3), so an Azure-only
+    /// deployment cannot use the Kokoro pool at all — the registry would reject every
+    /// character voice at render time and the chapter would ship silent. Voices are config,
+    /// not code (§4.4), and this is the seam that makes that true in practice.
+    ///
+    /// The narrator's and `SYSTEM`'s voices are filtered out of the pool, so a character
+    /// can never draw one of them however the caller ordered the list.
+    pub fn with_voices(narrator_voice: String, system_voice: String, pool: Vec<String>) -> Self {
+        let pool = pool
+            .into_iter()
+            .filter(|v| *v != narrator_voice && *v != system_voice)
+            .collect();
         Self {
             narrator_voice,
-            pool: character_pool(),
+            system_voice,
+            pool,
         }
     }
 
     pub fn narrator_voice(&self) -> &str {
         &self.narrator_voice
+    }
+
+    pub fn system_voice(&self) -> &str {
+        &self.system_voice
+    }
+
+    /// The character pool actually in use, after reserved voices were removed.
+    pub fn pool(&self) -> &[String] {
+        &self.pool
     }
 
     /// Voice for a speaker that already has one, or `None`.
@@ -152,7 +181,7 @@ impl VoiceAssigner {
 
             let voice_ref = match sp.kind {
                 SpeakerKind::Narrator => self.narrator_voice.clone(),
-                SpeakerKind::System => SYSTEM_VOICE.to_string(),
+                SpeakerKind::System => self.system_voice.clone(),
                 SpeakerKind::Character => self.draw_character_voice(&taken),
             };
 

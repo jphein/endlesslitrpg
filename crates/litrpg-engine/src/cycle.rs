@@ -31,8 +31,10 @@
 //! these leave the prose published. Only a pass-1 failure abandons the cycle, and it does
 //! so **before anything is written**, so there is no partial chapter to clean up.
 
-use std::sync::Mutex;
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 
+use litrpg_core::content_hash;
 use litrpg_ember::prompt::{ChapterSummary, LoreEntry, Pass1Input, render_state_snapshot};
 use litrpg_ember::{Extraction, ParsedSegment, match_lore, parse_tagged_prose};
 use litrpg_store::{NewChapter, Store};
@@ -56,11 +58,25 @@ pub const PASS2_TEMPERATURES: &[f64] = &[0.0, 0.15, 0.3];
 /// Longest derived chapter title before truncation.
 const TITLE_MAX: usize = 60;
 
+/// How many times one chapter's render is retried before the loop stops picking it up.
+///
+/// The count is **in-memory**, so a daemon restart clears it. That is deliberate: a
+/// restart is usually what happens *after* someone fixes the missing model file or the
+/// expired key, and it is the natural moment to try again.
+pub const MAX_RESUME_ATTEMPTS: u32 = 3;
+
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
     pub buffer_target: u32,
     pub target_words: u32,
     pub narrator_voice: String,
+    /// Voice for `[SYSTEM]` blocks. The robotic character comes from the post-render
+    /// ffmpeg pass (§7.4), not from the voice itself.
+    pub system_voice: String,
+    /// Pool characters draw from, in preference order. Must belong to a registered
+    /// backend: a `voice_ref` names its backend, so a sherpa pool on an Azure-only
+    /// deployment fails at render time and the chapter ships silent.
+    pub character_voices: Vec<String>,
     pub summary_window: usize,
 }
 
@@ -70,6 +86,8 @@ impl Default for EngineConfig {
             buffer_target: litrpg_config::MIN_BUFFER_TARGET + 1,
             target_words: litrpg_ember::DEFAULT_TARGET_WORDS,
             narrator_voice: crate::cast::NARRATOR_FALLBACK_VOICE.to_string(),
+            system_voice: crate::cast::SYSTEM_VOICE.to_string(),
+            character_voices: crate::cast::character_pool(),
             summary_window: SUMMARY_WINDOW,
         }
     }
@@ -81,6 +99,8 @@ impl EngineConfig {
             buffer_target: c.buffer_target,
             target_words: c.target_words,
             narrator_voice: c.narrator_voice.clone(),
+            system_voice: crate::cast::SYSTEM_VOICE.to_string(),
+            character_voices: crate::cast::character_pool(),
             summary_window: SUMMARY_WINDOW,
         }
     }
@@ -93,12 +113,15 @@ pub struct Engine<G, R, L, A> {
     /// `Sync`, and without this the cycle future would not be `Send` and could not be
     /// spawned. Guards are always scoped inside [`Engine::with_store`] so one is never
     /// held across an await.
-    store: Mutex<Store>,
+    store: Arc<Mutex<Store>>,
     generator: G,
     renderer: R,
     library: L,
     artifacts: A,
     config: EngineConfig,
+    /// Per-chapter count of failed resume renders, so a chapter that can never render
+    /// stops being picked up. See [`MAX_RESUME_ATTEMPTS`].
+    resume_failures: Mutex<BTreeMap<u32, u32>>,
 }
 
 impl<G, R, L, A> Engine<G, R, L, A>
@@ -116,14 +139,56 @@ where
         artifacts: A,
         config: EngineConfig,
     ) -> Self {
-        Self {
-            store: Mutex::new(store),
+        Self::with_shared_store(
+            Arc::new(Mutex::new(store)),
             generator,
             renderer,
             library,
             artifacts,
             config,
+        )
+    }
+
+    /// Build over a store handle shared with something else — normally
+    /// [`StoreLibrary`](crate::StoreLibrary), which needs the *same* connection rather
+    /// than a second one to the same file.
+    pub fn with_shared_store(
+        store: Arc<Mutex<Store>>,
+        generator: G,
+        renderer: R,
+        library: L,
+        artifacts: A,
+        config: EngineConfig,
+    ) -> Self {
+        Self {
+            store,
+            generator,
+            renderer,
+            library,
+            artifacts,
+            config,
+            resume_failures: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    /// How many times chapter `number`'s render has failed since this process started.
+    /// Useful for `litrpg status`: a chapter stuck at [`MAX_RESUME_ATTEMPTS`] needs a look.
+    pub fn resume_attempts(&self, number: u32) -> u32 {
+        self.resume_failures
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&number)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Chapters that have prose, no audio, and have not exhausted their retries.
+    pub fn stuck_chapters(&self) -> Result<Vec<u32>, EngineError> {
+        let unrendered = self.with_store(unrendered_chapters)?;
+        Ok(unrendered
+            .into_iter()
+            .filter(|n| self.resume_attempts(*n) >= MAX_RESUME_ATTEMPTS)
+            .collect())
     }
 
     pub fn config(&self) -> &EngineConfig {
@@ -146,10 +211,15 @@ where
         &self.artifacts
     }
 
-    /// Hand the store back, so a caller can hold the engine and still run CLI queries
-    /// (`status`, `cast`, `rewind`) against the same database.
-    pub fn into_store(self) -> Store {
-        self.store.into_inner().unwrap_or_else(|e| e.into_inner())
+    /// A handle on the same connection, for building a [`StoreLibrary`](crate::StoreLibrary)
+    /// or running CLI queries (`status`, `cast`, `rewind`) against the same database.
+    pub fn store_handle(&self) -> Arc<Mutex<Store>> {
+        Arc::clone(&self.store)
+    }
+
+    /// Hand the store back when the engine is done with it.
+    pub fn into_shared_store(self) -> Arc<Mutex<Store>> {
+        self.store
     }
 
     /// Run store work under a scoped lock. Poison-tolerant: a panic elsewhere must not
@@ -170,20 +240,45 @@ where
     /// playback cursor yet (see the notes in `morpheus-engine.md`).
     pub async fn run_cycle(&self, consumed_through: u32) -> Result<CycleOutcome, EngineError> {
         // ---- 0. Resume ------------------------------------------------------
-        // A chapter with prose but no audio means either a crash between publish
-        // stages or an earlier TTS failure. Re-render it; never regenerate prose that
-        // has already shipped.
-        if let Some(number) = self.with_store(unrendered_chapter)? {
+        // A chapter with prose but no audio means either a crash between publish stages
+        // or an earlier TTS failure. Re-render it; never regenerate prose that has
+        // already shipped.
+        //
+        // A failed resume **falls through** to normal generation rather than returning.
+        // Returning here would mean a chapter that can never render — a `voice_ref` the
+        // registry rejects, a manifest `attach_audio` refuses, a backend down for a week —
+        // gets picked up first every single cycle and no new chapter is ever produced.
+        // §10 says a bookkeeping failure must not cost a chapter; it must equally not cost
+        // every chapter after it.
+        if let Some(number) = self.next_resumable()? {
             info!(
                 chapter = number,
                 "resuming render for a chapter with no audio"
             );
-            let planned = self.replan_from_store(number)?;
-            let has_audio = self.render_and_publish(number, &planned).await;
-            return Ok(CycleOutcome::ResumedRender {
-                chapter: number,
-                has_audio,
-            });
+
+            let resumed = match self.replan_from_store(number) {
+                Ok(planned) => self.render_and_publish(number, &planned).await,
+                Err(e) => {
+                    warn!(chapter = number, error = %e, "could not rebuild segments to resume");
+                    false
+                }
+            };
+
+            if resumed {
+                self.clear_resume_failures(number);
+                return Ok(CycleOutcome::ResumedRender {
+                    chapter: number,
+                    has_audio: true,
+                });
+            }
+
+            let attempts = self.note_resume_failure(number);
+            warn!(
+                chapter = number,
+                attempts,
+                max = MAX_RESUME_ATTEMPTS,
+                "resume render failed; carrying on with a new chapter so the serial keeps moving"
+            );
         }
 
         // ---- 1. Buffer check ------------------------------------------------
@@ -236,7 +331,7 @@ where
             target_words,
         };
 
-        let prompt_hash = stable_hash(&story.prompt_md);
+        let prompt_hash = content_hash(&story.prompt_md);
 
         // ---- 3. Pass 1 ------------------------------------------------------
         let prose = match self.pass1(&input).await {
@@ -268,7 +363,7 @@ where
             .map(|c| (c.speaker, c.voice_ref))
             .collect();
 
-        let assigner = VoiceAssigner::new(self.config.narrator_voice.clone());
+        let assigner = self.assigner();
         let new_cast = assigner.assign(&speakers, &existing_cast);
         for a in &new_cast {
             info!(speaker = %a.speaker, voice = %a.voice_ref, "casting new speaker");
@@ -463,6 +558,40 @@ where
         Ok(())
     }
 
+    /// Voice assigner built from config, so a deployment can swap backends without code.
+    fn assigner(&self) -> VoiceAssigner {
+        VoiceAssigner::with_voices(
+            self.config.narrator_voice.clone(),
+            self.config.system_voice.clone(),
+            self.config.character_voices.clone(),
+        )
+    }
+
+    /// The lowest-numbered chapter that has prose, no audio, and retries left.
+    fn next_resumable(&self) -> Result<Option<u32>, EngineError> {
+        let unrendered = self.with_store(unrendered_chapters)?;
+        Ok(unrendered
+            .into_iter()
+            .find(|n| self.resume_attempts(*n) < MAX_RESUME_ATTEMPTS))
+    }
+
+    fn note_resume_failure(&self, number: u32) -> u32 {
+        let mut map = self
+            .resume_failures
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let slot = map.entry(number).or_insert(0);
+        *slot += 1;
+        *slot
+    }
+
+    fn clear_resume_failures(&self, number: u32) {
+        self.resume_failures
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&number);
+    }
+
     /// Rebuild the planned segments for an already-written chapter, for a resumed render.
     ///
     /// Prefers the persisted `segments` rows; falls back to re-parsing `text_md` when a
@@ -493,7 +622,7 @@ where
 
         // Any speaker missing from the cast gets one now, deterministically, and it is
         // persisted so a second resume produces identical audio.
-        let assigner = VoiceAssigner::new(self.config.narrator_voice.clone());
+        let assigner = self.assigner();
         let new_cast = assigner.assign(&distinct_speakers(&parsed), &existing_cast);
         for a in &new_cast {
             self.with_store(|s| s.upsert_cast(&a.speaker, &a.voice_ref, kind_str(a.kind), number))?;
@@ -636,27 +765,9 @@ pub fn derive_title(number: u32, summary: Option<&str>) -> String {
     }
 }
 
-/// FNV-1a, hex. A stable, dependency-free digest for `chapters.prompt_hash`, whose job is
-/// provenance (§9.3: "tell drift from your own edit"), not security.
-pub fn stable_hash(s: &str) -> String {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in s.as_bytes() {
-        hash ^= *b as u64;
-        hash = hash.wrapping_mul(0x100_0000_01b3);
-    }
-    format!("{hash:016x}")
-}
-
-/// The lowest-numbered chapter that has prose but no audio.
-///
-/// Scans every chapter row: there is no `chapters_missing_audio()` query in the store yet,
-/// and at one scan per multi-minute cycle the cost is irrelevant next to a GPU pass.
-fn unrendered_chapter(store: &Store) -> litrpg_store::Result<Option<u32>> {
-    Ok(store
-        .chapters_since(0)?
-        .into_iter()
-        .find(|c| !c.has_audio)
-        .map(|c| c.number))
+/// Every chapter that has prose but no audio, oldest first.
+fn unrendered_chapters(store: &Store) -> litrpg_store::Result<Vec<u32>> {
+    store.chapters_missing_audio()
 }
 
 /// Chapters that are rendered and still ahead of the listener.
@@ -705,10 +816,14 @@ mod tests {
     }
 
     #[test]
-    fn stable_hash_is_stable_and_sensitive() {
-        assert_eq!(stable_hash("abc"), stable_hash("abc"));
-        assert_ne!(stable_hash("abc"), stable_hash("abd"));
-        assert_eq!(stable_hash("abc").len(), 16);
+    fn the_prompt_hash_is_cores_canonical_one_not_a_local_copy() {
+        // `story.prompt_hash` is written by the CLI with `litrpg_core::content_hash`,
+        // which renders as `fnv1a64:<16 hex>`. A bare-hex hash here would compare unequal
+        // to it forever, and §9.3's whole point is asking "did chapter 40 come from the
+        // prompt I have now?".
+        assert_eq!(content_hash("abc"), litrpg_core::content_hash("abc"));
+        assert!(content_hash("abc").starts_with("fnv1a64:"));
+        assert_ne!(content_hash("abc"), content_hash("abd"));
     }
 
     #[test]

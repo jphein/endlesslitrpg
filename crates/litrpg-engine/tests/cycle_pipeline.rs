@@ -14,9 +14,8 @@ use support::*;
 fn config() -> EngineConfig {
     EngineConfig {
         buffer_target: 3,
-        target_words: 2000,
         narrator_voice: "sherpa:piper-en_GB-cori:0".to_string(),
-        summary_window: 5,
+        ..EngineConfig::default()
     }
 }
 
@@ -593,8 +592,8 @@ async fn a_chapter_left_without_audio_is_re_rendered_not_regenerated() {
 
     // Cycle 2 with a working renderer: the resume path must fix the audio and leave the
     // prose untouched. Regenerating it would rewrite history that already shipped.
-    let e2 = Engine::new(
-        e.into_store(),
+    let e2 = Engine::with_shared_store(
+        e.into_shared_store(),
         FakeGenerator::new().with_prose("[narrator] COMPLETELY DIFFERENT PROSE."),
         FakeRenderer::new(),
         FakeLibrary::new(),
@@ -635,8 +634,8 @@ async fn a_resumed_render_rebuilds_the_same_voices_from_the_persisted_cast() {
     e.run_cycle(0).await.unwrap();
     let cast_before = e.cast_pairs();
 
-    let e2 = Engine::new(
-        e.into_store(),
+    let e2 = Engine::with_shared_store(
+        e.into_shared_store(),
         FakeGenerator::new(),
         FakeRenderer::new(),
         FakeLibrary::new(),
@@ -683,8 +682,8 @@ async fn resume_runs_before_the_buffer_check_so_a_stuck_chapter_cannot_be_starve
 
     // `consumed_through = 2` frees the buffer so a third chapter is generated; its
     // render fails, leaving it text-only.
-    let e = Engine::new(
-        e.into_store(),
+    let e = Engine::with_shared_store(
+        e.into_shared_store(),
         FakeGenerator::new(),
         FakeRenderer::failing(),
         FakeLibrary::new(),
@@ -696,8 +695,8 @@ async fn resume_runs_before_the_buffer_check_so_a_stuck_chapter_cannot_be_starve
 
     // Now the buffer is full again (chapters 1 and 2 both have audio, target 2), so a
     // naive implementation would idle and never fix chapter 3.
-    let e = Engine::new(
-        e.into_store(),
+    let e = Engine::with_shared_store(
+        e.into_shared_store(),
         FakeGenerator::new(),
         FakeRenderer::new(),
         FakeLibrary::new(),
@@ -711,6 +710,89 @@ async fn resume_runs_before_the_buffer_check_so_a_stuck_chapter_cannot_be_starve
         }
         other => panic!("expected ResumedRender even with a full buffer, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn a_permanently_unrenderable_chapter_does_not_block_every_future_chapter() {
+    // The resume stage runs first and picks the lowest-numbered chapter without audio.
+    // If that chapter can never render -- a voice_ref the registry rejects, a manifest
+    // `attach_audio` refuses, a backend that is down for a week -- then a naive resume
+    // returns every cycle and the serial stops dead. §10's rule is that a bookkeeping
+    // failure must not cost a chapter; it must equally not cost *every chapter after it*.
+    let e = engine(
+        FakeGenerator::new(),
+        FakeRenderer::failing(),
+        FakeLibrary::new(),
+        FakeArtifacts::new(),
+    );
+
+    // Ten cycles against a renderer that never works.
+    for _ in 0..10 {
+        e.run_cycle(u32::MAX).await.unwrap();
+    }
+
+    assert!(
+        e.latest_number() > 1,
+        "the story stalled on chapter 1: latest is {} after ten cycles",
+        e.latest_number()
+    );
+    assert!(
+        !e.chapter_text(2).is_empty(),
+        "chapter 2 should have been written despite chapter 1 being unrenderable"
+    );
+}
+
+#[tokio::test]
+async fn a_hopeless_chapter_stops_being_retried_and_is_reported_as_stuck() {
+    let e = engine(
+        FakeGenerator::new(),
+        FakeRenderer::failing(),
+        FakeLibrary::new(),
+        FakeArtifacts::new(),
+    );
+
+    for _ in 0..10 {
+        e.run_cycle(u32::MAX).await.unwrap();
+    }
+
+    assert_eq!(
+        e.resume_attempts(1),
+        litrpg_engine::MAX_RESUME_ATTEMPTS,
+        "chapter 1's retries must be capped, not attempted once per cycle forever"
+    );
+    assert!(
+        e.stuck_chapters().unwrap().contains(&1),
+        "a chapter that exhausted its retries must be reportable, not silently abandoned"
+    );
+}
+
+#[tokio::test]
+async fn a_recovered_render_clears_the_stuck_marker() {
+    let e = engine(
+        FakeGenerator::new(),
+        FakeRenderer::failing(),
+        FakeLibrary::new(),
+        FakeArtifacts::new(),
+    );
+    e.run_cycle(u32::MAX).await.unwrap(); // ch1 text-only
+    e.run_cycle(u32::MAX).await.unwrap(); // resume fails once
+    assert_eq!(e.resume_attempts(1), 1);
+
+    // The backend comes back.
+    let e = Engine::with_shared_store(
+        e.into_shared_store(),
+        FakeGenerator::new(),
+        FakeRenderer::new(),
+        FakeLibrary::new(),
+        FakeArtifacts::new(),
+        config(),
+    );
+    assert!(matches!(
+        e.run_cycle(0).await.unwrap(),
+        CycleOutcome::ResumedRender { chapter: 1, .. }
+    ));
+    assert_eq!(e.resume_attempts(1), 0, "a success must clear the counter");
+    assert!(e.stuck_chapters().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -728,8 +810,8 @@ async fn a_resume_replaces_segments_rather_than_duplicating_them() {
     e.run_cycle(0).await.unwrap();
     assert_eq!(e.segment_count(1), 0, "a failed render attaches nothing");
 
-    let e = Engine::new(
-        e.into_store(),
+    let e = Engine::with_shared_store(
+        e.into_shared_store(),
         FakeGenerator::new(),
         FakeRenderer::new(),
         FakeLibrary::new(),

@@ -40,6 +40,7 @@ pub mod adapters;
 pub mod cast;
 pub mod cycle;
 pub mod error;
+pub mod library;
 pub mod ports;
 pub mod publish;
 pub mod render;
@@ -50,10 +51,11 @@ pub use cast::{
     character_pool, kokoro_voice_ref,
 };
 pub use cycle::{
-    Engine, EngineConfig, PASS1_TEMPERATURES, PASS2_TEMPERATURES, SUMMARY_WINDOW, derive_title,
-    distinct_speakers, plain_chapter_text, plan_segments, stable_hash,
+    Engine, EngineConfig, MAX_RESUME_ATTEMPTS, PASS1_TEMPERATURES, PASS2_TEMPERATURES,
+    SUMMARY_WINDOW, derive_title, distinct_speakers, plain_chapter_text, plan_segments,
 };
 pub use error::{CycleOutcome, EngineError};
+pub use library::StoreLibrary;
 pub use ports::{Artifacts, Generator, Library, Renderer, StoryMeta};
 pub use publish::FsArtifacts;
 pub use render::{PlannedSegment, RenderedChapter, assemble, chapter_markdown, word_count};

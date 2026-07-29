@@ -7,3 +7,9 @@
 #![no_std]
 
 extern crate alloc;
+
+pub mod manifest;
+pub mod voice;
+
+pub use manifest::{BYTES_PER_MS, Manifest, SAMPLE_RATE_HZ, Segment, SpeakerKind};
+pub use voice::{VoiceRef, VoiceRefError};

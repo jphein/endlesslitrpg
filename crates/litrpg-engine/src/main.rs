@@ -306,7 +306,7 @@ async fn run(args: Args) -> Result<ExitCode, Box<dyn std::error::Error>> {
 #[cfg(feature = "sherpa")]
 fn register_sherpa(registry: &mut TtsRegistry) {
     use litrpg_tts::sherpa::SherpaConfig;
-    use litrpg_tts::sherpa::engine::SherpaBackend;
+    use litrpg_tts::sherpa::SherpaBackend;
 
     let cfg = SherpaConfig::default();
     let broken = cfg.preflight();

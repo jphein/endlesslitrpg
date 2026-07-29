@@ -124,8 +124,22 @@ impl Store {
         Ok(())
     }
 
-    /// Character cast speakers ∪ *applied* ledger subjects ∪ lore entries of kind
-    /// `character`, minus the narrator and SYSTEM.
+    /// The protagonist ∪ character cast speakers ∪ *applied* ledger subjects ∪ lore
+    /// entries of kind `character`, minus the narrator and SYSTEM.
+    ///
+    /// # Why the protagonist is seeded from `story`
+    ///
+    /// Found by the first real run: a chapter one that is all narration and `[SYSTEM]`
+    /// notices produces **no character cast rows**, because nobody speaks. With nothing
+    /// in `cast`, `lore` or `ledger`, the known set is empty and every proposed delta is
+    /// rejected as `UnknownSubject` — 12 of them, in the run that found this. The gate
+    /// was right each time and the ledger could still never start, because the
+    /// protagonist only becomes known by *talking*.
+    ///
+    /// `story.protagonist` is the one character who exists by definition rather than by
+    /// appearance, so it seeds the set. Note this makes the name in `story.protagonist`
+    /// load-bearing: it must match what the prompt calls them, or the model will address
+    /// deltas to a name the gate has never heard of.
     ///
     /// The `applied = 1` filter matters: a delta for a misspelled subject is stored
     /// with `applied = 0` for audit, and without the filter that typo would enter
@@ -146,7 +160,8 @@ impl Store {
     /// already accrued rows under it, which is exactly the state a live run produced.
     pub fn known_subjects(&self) -> Result<BTreeSet<String>> {
         let mut stmt = self.conn.prepare(
-            "SELECT speaker FROM cast WHERE kind NOT IN ('narrator', 'system')
+            "SELECT protagonist FROM story WHERE protagonist <> ''
+             UNION SELECT speaker FROM cast WHERE kind NOT IN ('narrator', 'system')
              UNION SELECT subject FROM ledger WHERE applied = 1
              UNION SELECT name FROM lore WHERE kind = 'character'
              EXCEPT SELECT speaker FROM cast WHERE kind IN ('narrator', 'system')",

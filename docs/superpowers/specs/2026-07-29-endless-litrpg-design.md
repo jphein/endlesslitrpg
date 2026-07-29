@@ -315,6 +315,22 @@ broken, reproduced the substitution. **A test of a recovery path must start from
 Exercising it from a healthy fixture passes trivially and proves nothing — and it will keep passing
 while the recovery recovers nothing.
 
+And one about fixtures, learned by breaking the same test twice. Two of the watch's tests asserted
+literals derived from a *regenerated* input — `windows == 18` and `duration_ms == 856_300`, both
+computed from chapter timings that a re-render moved. Patching the literals would have left a third
+waiting, so the rule is about the class:
+
+> A fixture that gets refreshed may have **counts** asserted against it, never **timings**. Frozen
+> snapshots keep their literals safely.
+>
+> A test asserting a literal against a regenerated input is not testing the code. It is testing that
+> nobody regenerated the input.
+
+The replacement assertions are stronger than the literals they removed, which is the tell that this
+was the right fix rather than a weakening: the segments array agrees with the top-level duration,
+offsets tile with no gap or overlap, every offset is sample-aligned, no segment runs backwards, and
+the window count is *derived* (`total.div_ceil(WINDOW_BYTES)`). None of those can go stale.
+
 One more, learned by writing the same sentence wrong twice in an afternoon: **assert the claim
 positively, not only negatively.** A negative assertion pins the mistake that has already been made
 and nothing else. `!out.contains("restoring the original")` was added the first time that phrase was
@@ -641,7 +657,7 @@ highlighting.
 
 ## 9. Interfaces
 
-### 9.1 HTTP (axum, plain HTTP, `10.0.6.107:8093`)
+### 9.1 HTTP (axum, plain HTTP, `katana.lan:8093` — `10.0.6.129`)
 
 | Route | Consumer |
 |---|---|
@@ -658,8 +674,29 @@ highlighting.
 | `GET /api/character/{subject}` | one subject's stats, equipment and appearance — watch screens (§9.4.1) |
 | `GET /healthz` | liveness |
 
-Plain HTTP with **no TLS and no DNS** is a hard requirement inherited from the watch, which is why
-`familiar` needs a **pinned static DHCP lease** so `10.0.6.107` cannot drift.
+**Two corrections to what this section originally claimed, both measured rather than reasoned.**
+
+**The host is `katana`, not `familiar`.** D4 puts the daemon beside Ember and the deployment went
+elsewhere: `10.0.6.129:8093/healthz` answers, `10.0.6.107:8093` does not, and familiar has no unit
+installed. The address in D4 was never wrong — the daemon moved. Whether it *should* live on familiar
+is an open deployment question; nothing in the design depends on the answer.
+
+**"No TLS and no DNS" was half wrong.** No TLS is right: mbedTLS wants ~25–40 KB of SRAM against the
+watch's measured `+2,856 B` margin, which is a boot panic rather than a trade-off. **But the watch has
+resolved DNS since the weather feature** — `embassy-net`'s `dns` feature is on and
+`src/net/weather.rs:62` calls `stack.dns_query`. Adding it to the story client cost **16 bytes**.
+
+That matters beyond the correction: the **pinned static DHCP lease this section justified on
+"no DNS" grounds is belt-and-braces, not load-bearing.** The lease does exist — gatekeeper has MAC
+reservations for katana (`10.0.6.129`) and familiar (`10.0.6.107`), both with `dns='1'`, so
+`katana.lan` resolves on the LAN today. The client uses the name with the literal as a fallback,
+because losing an 18-minute chapter to a resolver blip is worse than a stale address, and resolves
+**once per chapter** rather than per Range window.
+
+A related trap, recorded because it was nearly acted on twice: `ip addr` reporting
+`10.0.6.129/24 dynamic` means only "obtained via DHCP", which is exactly what a MAC reservation looks
+like from the client. **Reserved and unreserved are indistinguishable client-side** — only the DHCP
+server knows. Check gatekeeper, not the interface.
 
 **Authentication: none, accepted deliberately.** Every route is open on a LAN-reachable port. This
 follows from the watch's constraints — it cannot do TLS, so there is no credential worth protecting in

@@ -393,6 +393,23 @@ Re-asserting escalates and settles nothing, because both sides have honest evide
 artifact resolves it in one exchange. The rule has to be applied symmetrically to work: the second
 occurrence ran in the opposite direction from the first, and the tell was identical.
 
+### 5.8 A green workspace has a timestamp
+
+Two parallel efforts reported `1079` and `330` tests passing. The combined tree was **red** — one
+side's new write-boundary guard made the other's test unable to construct its own precondition.
+
+The tempting lesson is "run the whole workspace, not just your crate", and it is the wrong one:
+**both sides already were.** Each ran `--workspace` on every gate. The gap was not practice, it was
+timing — a green result is stamped at a moment, and both stamps predated the other side's final
+state. Every individual claim was true when measured.
+
+> "Run the integration" is not sufficient. It has to be **run after both sides land**, and that is
+> structurally the orchestrator's step: neither agent can perform it, because neither can know it
+> is last.
+
+Same shape as §5.7 — a true statement about a snapshot that has since moved — but the remedy is
+different, because no amount of diligence inside either effort would have caught it.
+
 ---
 
 ## 6. Data model

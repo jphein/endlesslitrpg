@@ -34,7 +34,8 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use litrpg_core::content_hash;
+use litrpg_core::speaker::{self, same_speaker};
+use litrpg_core::{SpeakerKind, content_hash};
 use litrpg_ember::prompt::{ChapterSummary, LoreEntry, Pass1Input, render_state_snapshot};
 use litrpg_ember::{Extraction, ParsedSegment, match_lore, parse_tagged_prose};
 use litrpg_store::{NewChapter, Store};
@@ -512,7 +513,9 @@ where
         let known: Vec<String> = self
             .with_store(|s| s.known_subjects())?
             .into_iter()
-            .filter(|s| !is_voice_not_a_person(s))
+            // A *naming* decision — which names to offer the model — so `is_reserved` is right
+            // here. The stats guard below asks `kind` instead.
+            .filter(|s| !speaker::is_reserved(s))
             .collect();
         let extraction = self.pass2(&plain_text, &known).await;
         let state_dirty = extraction.is_none();
@@ -647,12 +650,20 @@ where
                     })?;
                     for seg in planned
                         .iter_mut()
-                        .filter(|p| p.speaker.eq_ignore_ascii_case(&fixed.speaker))
+                        .filter(|p| same_speaker(&p.speaker, &fixed.speaker))
                     {
                         seg.voice_ref = fixed.voice_ref.clone();
                     }
                 }
             }
+
+            // Fetched after the cast upserts and after `new_lore`, so a character introduced this
+            // chapter is judged by their own row rather than by absence.
+            let cast_kinds: Vec<(String, String)> = self
+                .with_store(|s| s.cast())?
+                .into_iter()
+                .map(|c| (c.speaker, c.kind))
+                .collect();
 
             for pd in &e.deltas {
                 let delta = match pd.to_delta() {
@@ -690,11 +701,11 @@ where
                     continue;
                 }
 
-                if is_voice_not_a_person(&delta.subject) {
+                if subject_is_a_role(&delta.subject, &cast_kinds) {
                     warn!(
                         subject = %delta.subject,
                         field = %delta.field,
-                        "refusing a delta addressed to a voice rather than a character"
+                        "refusing a delta whose subject is a role row, not a character"
                     );
                     rejected += 1;
                     continue;
@@ -937,7 +948,7 @@ where
                 .map(|s| {
                     let voice_ref = match cast
                         .iter()
-                        .find(|(sp, _)| sp.eq_ignore_ascii_case(&s.speaker))
+                        .find(|(sp, _)| same_speaker(sp, &s.speaker))
                         .map(|(_, v)| v.clone())
                     {
                         Some(v) => v,
@@ -998,10 +1009,7 @@ where
 pub fn distinct_speakers(parsed: &[ParsedSegment]) -> Vec<ParsedSpeaker> {
     let mut out: Vec<ParsedSpeaker> = Vec::new();
     for seg in parsed {
-        if !out
-            .iter()
-            .any(|p| p.speaker.eq_ignore_ascii_case(&seg.speaker))
-        {
+        if !out.iter().any(|p| same_speaker(&p.speaker, &seg.speaker)) {
             out.push(ParsedSpeaker {
                 speaker: seg.speaker.clone(),
                 kind: seg.kind,
@@ -1024,12 +1032,12 @@ pub fn plan_segments(
     let lookup = |speaker: &str| -> String {
         new_cast
             .iter()
-            .find(|a| a.speaker.eq_ignore_ascii_case(speaker))
+            .find(|a| same_speaker(&a.speaker, speaker))
             .map(|a| a.voice_ref.clone())
             .or_else(|| {
                 existing_cast
                     .iter()
-                    .find(|(s, _)| s.eq_ignore_ascii_case(speaker))
+                    .find(|(s, _)| same_speaker(s, speaker))
                     .map(|(_, v)| v.clone())
             })
             .unwrap_or_else(|| narrator_voice.to_string())
@@ -1165,17 +1173,52 @@ fn is_placeholder_value(d: &litrpg_core::Delta) -> bool {
     PLACEHOLDER_VALUES.contains(&t.as_str())
 }
 
-/// Speaker names that are voices rather than people, and so can never be ledger subjects.
+/// Whether a delta's subject names a **role row** rather than a person.
 ///
 /// `cast` holds a row for `narrator` and `SYSTEM` because they need voices, and the store's
-/// `known_subjects()` unions every cast speaker — which means both are offered to pass 2 as
-/// legitimate subjects and accepted by the gate. Measured live: pass 2 duly attributed a
-/// whole stat block to `subject: "SYSTEM"`, so Kaelen's inventory landed under a pseudo-person
-/// and his own character screen stayed empty. Filtered on both sides here: out of the
-/// known-subject list the model sees, and out of the deltas that reach the ledger.
-fn is_voice_not_a_person(subject: &str) -> bool {
-    subject.eq_ignore_ascii_case(litrpg_ember::parse::NARRATOR)
-        || subject.eq_ignore_ascii_case(litrpg_ember::parse::SYSTEM)
+/// `known_subjects()` unions every cast speaker — so both are offered to pass 2 as legitimate
+/// subjects and accepted by the gate. Measured live: pass 2 attributed a whole stat block to
+/// `subject: "SYSTEM"`, so Kaelen's inventory landed under a pseudo-person while his own
+/// character screen stayed empty.
+///
+/// # Decided by `kind`, not by name
+///
+/// This used to ask whether the *name* was `narrator` or `SYSTEM`, which is a different question
+/// and can give a different answer: a character legitimately named `System` in the prose is
+/// excluded by the name rule and included by the kind rule. `core::speaker::is_reserved` decides
+/// what to **call** something; a row's `kind` is the only authority on whether it can **hold
+/// stats**, so the stats guard asks `kind`.
+///
+/// The visible consequence: a character called `System` now keeps their stats, because their cast
+/// row says `character`.
+fn subject_is_a_role(subject: &str, cast: &[(String, String)]) -> bool {
+    // `kind` is the authority. Look the subject up in the cast and ask what kind of row it is,
+    // rather than asking what it is called.
+    if let Some((speaker, kind)) = cast.iter().find(|(sp, _)| same_speaker(sp, subject)) {
+        return match SpeakerKind::from_canonical(kind) {
+            Some(SpeakerKind::Narrator | SpeakerKind::System) => true,
+            Some(SpeakerKind::Character) => false,
+            None => {
+                // The row's kind is not a value we wrote, so the authority is unreadable. Fall
+                // back to the *name*, which is the weaker rule, and say so — a corrupt kind on a
+                // row called `narrator` is still almost certainly the narrator, and letting stats
+                // accrue to it is the failure this guard exists to stop.
+                let reserved = speaker::is_reserved(speaker);
+                warn!(
+                    %speaker,
+                    kind = %kind,
+                    reserved,
+                    "cast row has an unreadable kind; falling back to the name to decide personhood"
+                );
+                reserved
+            }
+        };
+    }
+
+    // Not in the cast at all. Nothing to judge by kind, and the validation gate's
+    // `UnknownSubject` check is the thing that catches an invented subject — so this guard
+    // declines to answer rather than guessing from the name.
+    false
 }
 
 /// Every chapter that has prose but no audio, oldest first.
@@ -1325,15 +1368,65 @@ mod tests {
     }
 
     #[test]
-    fn voices_are_never_ledger_subjects() {
-        assert!(is_voice_not_a_person("narrator"));
-        assert!(is_voice_not_a_person("NARRATOR"));
-        assert!(is_voice_not_a_person("SYSTEM"));
-        assert!(is_voice_not_a_person("system"));
-        assert!(!is_voice_not_a_person("Kaelen"));
-        assert!(!is_voice_not_a_person("Sera"));
-        // A character whose name merely contains one of them is still a person.
-        assert!(!is_voice_not_a_person("Systemsmith"));
+    fn a_role_row_cannot_hold_stats_but_a_character_named_system_can() {
+        let cast = |rows: &[(&str, &str)]| -> Vec<(String, String)> {
+            rows.iter()
+                .map(|(s, k)| (s.to_string(), k.to_string()))
+                .collect()
+        };
+
+        let roles = cast(&[
+            ("narrator", "narrator"),
+            ("SYSTEM", "system"),
+            ("Kaelen", "character"),
+        ]);
+        assert!(subject_is_a_role("narrator", &roles));
+        assert!(
+            subject_is_a_role("NARRATOR", &roles),
+            "case-insensitive via same_speaker"
+        );
+        assert!(subject_is_a_role("SYSTEM", &roles));
+        assert!(subject_is_a_role("system", &roles));
+        assert!(!subject_is_a_role("Kaelen", &roles));
+
+        // The behaviour that changed, and the reason the two rules must not be collapsed: a
+        // character the prose calls `System` has a cast row of kind `character`, so their stats
+        // are theirs. The old name-based rule silently discarded them.
+        let person = cast(&[("System", "character")]);
+        assert!(
+            !subject_is_a_role("System", &person),
+            "kind is the authority on personhood, not the name"
+        );
+        assert!(
+            speaker::is_reserved("System"),
+            "while the *name* is still reserved — the two questions differ, which is the point"
+        );
+
+        // A name merely containing a role word was never a role.
+        assert!(!subject_is_a_role(
+            "Systemsmith",
+            &cast(&[("Systemsmith", "character")])
+        ));
+
+        // Absent from the cast: this guard declines to answer, and `UnknownSubject` catches it.
+        assert!(!subject_is_a_role("Nobody", &roles));
+    }
+
+    #[test]
+    fn an_unreadable_kind_falls_back_to_the_name() {
+        // Defensive: if a row's kind is not a value we wrote, the authority is unreadable, so the
+        // weaker name rule applies rather than letting stats accrue to the narrator.
+        let corrupt = vec![("narrator".to_string(), "Narrator".to_string())];
+        assert!(
+            subject_is_a_role("narrator", &corrupt),
+            "a corrupt kind on a row called narrator is still the narrator"
+        );
+
+        let corrupt_person = vec![("Kaelen".to_string(), "wizard".to_string())];
+        assert!(
+            !subject_is_a_role("Kaelen", &corrupt_person),
+            "an unreadable kind on a non-reserved name stays a person"
+        );
     }
 
     #[test]

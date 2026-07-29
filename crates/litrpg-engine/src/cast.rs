@@ -22,6 +22,7 @@
 use std::collections::BTreeMap;
 
 use litrpg_core::SpeakerKind;
+use litrpg_core::speaker::same_speaker;
 use litrpg_tts::Gender;
 
 /// A distinct speaker seen in a chapter, in order of first appearance.
@@ -178,7 +179,7 @@ impl VoiceAssigner {
     fn existing<'a>(existing_cast: &'a [(String, String)], speaker: &str) -> Option<&'a str> {
         existing_cast
             .iter()
-            .find(|(s, _)| s.eq_ignore_ascii_case(speaker))
+            .find(|(s, _)| same_speaker(s, speaker))
             .map(|(_, v)| v.as_str())
     }
 
@@ -200,9 +201,7 @@ impl VoiceAssigner {
 
         for sp in speakers {
             let already_cast = Self::existing(existing_cast, &sp.speaker).is_some()
-                || out
-                    .iter()
-                    .any(|a| a.speaker.eq_ignore_ascii_case(&sp.speaker));
+                || out.iter().any(|a| same_speaker(&a.speaker, &sp.speaker));
             if already_cast {
                 continue;
             }
@@ -253,7 +252,7 @@ impl VoiceAssigner {
             }
             let Some(want) = wanted
                 .iter()
-                .find(|(name, _)| name.eq_ignore_ascii_case(&a.speaker))
+                .find(|(name, _)| same_speaker(name, &a.speaker))
                 .map(|(_, g)| g.as_str())
             else {
                 continue;

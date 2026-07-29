@@ -43,11 +43,11 @@
 
 use litrpg_core::SpeakerKind;
 
-/// Canonical narrator speaker name.
-pub const NARRATOR: &str = "narrator";
+/// Canonical narrator speaker name. Re-exported from core so there is one spelling.
+pub const NARRATOR: &str = litrpg_core::speaker::NARRATOR;
 
-/// Canonical SYSTEM speaker name (spec §6.0: `cast.kind` = `system`).
-pub const SYSTEM: &str = "SYSTEM";
+/// Canonical SYSTEM speaker name (spec §6.0: `cast.kind` = `system`). From core, one spelling.
+pub const SYSTEM: &str = litrpg_core::speaker::SYSTEM;
 
 /// One attributed run of text, before a voice or any timing exists.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -166,11 +166,14 @@ fn edit_distance(a: &[char], b: &[char]) -> usize {
 /// spelling each, so `[ sYsTeM ]` and `[SYSTEM]` are the same cast member rather than
 /// two rows drawing two different voices.
 pub fn canonical_speaker(name: &str) -> String {
-    let collapsed = name.split_whitespace().collect::<Vec<_>>().join(" ");
-    match classify_speaker(&collapsed) {
-        SpeakerKind::System => SYSTEM.to_string(),
-        SpeakerKind::Narrator => NARRATOR.to_string(),
-        SpeakerKind::Character => collapsed,
+    // `classify_speaker` is the lenient half and stays here: it tolerates a typo because it faces a
+    // *model*, and §5.3 puts that leniency at the boundary. Once the role is decided, the spelling
+    // is `litrpg_core::speaker::canonical`'s to choose — one owner for the storage form, so a
+    // stored row's identity can never depend on which crate wrote it.
+    match classify_speaker(name) {
+        SpeakerKind::System => litrpg_core::speaker::canonical(litrpg_core::speaker::SYSTEM),
+        SpeakerKind::Narrator => litrpg_core::speaker::canonical(litrpg_core::speaker::NARRATOR),
+        SpeakerKind::Character => litrpg_core::speaker::canonical(name),
     }
 }
 

@@ -12,6 +12,7 @@
 //! Pure functions over plain inputs, so the interesting rules are unit tests rather than
 //! something you only discover by deploying.
 
+use litrpg_core::speaker::{self, same_speaker};
 use litrpg_core::{SpeakerKind, VoiceRef};
 use litrpg_tts::{Gender, VoiceDesc};
 
@@ -187,7 +188,7 @@ pub fn substitute_unrenderable(
         // One decision per speaker, so every segment of theirs gets the same voice.
         if let Some((_, v)) = decided
             .iter()
-            .find(|(sp, _)| sp.eq_ignore_ascii_case(&seg.speaker))
+            .find(|(sp, _)| same_speaker(sp, &seg.speaker))
         {
             seg.voice_ref = v.clone();
             continue;
@@ -238,9 +239,11 @@ pub fn config_cast_divergence(
     system_voice: &str,
 ) -> Vec<String> {
     let mut notes = Vec::new();
-    for (role, configured) in [("narrator", narrator_voice), ("SYSTEM", system_voice)] {
-        let Some((_, cast_voice)) = cast.iter().find(|(sp, _)| sp.eq_ignore_ascii_case(role))
-        else {
+    for (role, configured) in [
+        (speaker::NARRATOR, narrator_voice),
+        (speaker::SYSTEM, system_voice),
+    ] {
+        let Some((_, cast_voice)) = cast.iter().find(|(sp, _)| same_speaker(sp, role)) else {
             continue; // not cast yet, so config will seed it — no divergence
         };
         if cast_voice != configured {

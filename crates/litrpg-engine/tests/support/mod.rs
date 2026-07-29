@@ -1,3 +1,7 @@
+// Each test binary uses a different slice of these fakes, so anything unused *here* is
+// exercised in a sibling target. Not dead, just not dead in this one.
+#![allow(dead_code)]
+
 //! Fakes for the four engine ports, so the whole cycle runs with no network, no GPU and
 //! no ffmpeg.
 

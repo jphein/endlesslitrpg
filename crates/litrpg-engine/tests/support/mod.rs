@@ -310,6 +310,11 @@ impl Library for FakeLibrary {
             .push((chapter, body_md.to_string()));
         Ok(())
     }
+
+    fn set_prompt_hash(&self, hash: &str) -> Result<(), EngineError> {
+        self.stamped.lock().unwrap().push(hash.to_string());
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------

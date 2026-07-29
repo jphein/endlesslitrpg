@@ -354,7 +354,12 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    /// Stamp every pending note as consumed by `chapter`.
+    /// Stamp **every** pending note as consumed by `chapter`.
+    ///
+    /// The argument is the stamp, not a filter — this drains the whole pending queue
+    /// regardless of which chapter the notes were written during. That is what §6.4
+    /// wants (notes are consumed at the next chapter boundary, whenever they arrived),
+    /// but the signature reads like it selects, so: it does not.
     pub fn mark_notes_consumed(&self, chapter: u32) -> Result<usize> {
         Ok(self.conn.execute(
             "UPDATE notes SET consumed_chapter = ?1 WHERE consumed_chapter IS NULL",

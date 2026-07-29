@@ -8,12 +8,16 @@
 
 extern crate alloc;
 
+pub mod artifact;
 pub mod hash;
 pub mod ledger;
 pub mod manifest;
 pub mod validate;
 pub mod voice;
 
+pub use artifact::{
+    CHAPTER_DIGITS, chapter_stem, manifest_name, media_name, mp3_name, pcm_name, text_name,
+};
 pub use hash::{HASH_ALGO, content_hash, content_hash_u64};
 pub use ledger::{LedgerEntry, Op, StateSnapshot, Value, fold, rewind};
 pub use manifest::{BYTES_PER_MS, Manifest, SAMPLE_RATE_HZ, Segment, SpeakerKind};

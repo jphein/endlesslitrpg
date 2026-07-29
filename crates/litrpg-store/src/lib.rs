@@ -4,6 +4,8 @@ pub mod chapters;
 pub mod ledger;
 pub mod migrations;
 
+pub use ledger::{CastRow, NoteRow, REWOUND_REASON};
+
 pub use chapters::{ChapterRow, NewChapter};
 
 use rusqlite::Connection;

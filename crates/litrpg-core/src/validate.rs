@@ -60,6 +60,31 @@ pub enum Rejection {
     UnknownAppearTrait,
 }
 
+impl Rejection {
+    /// A stable, payload-free identifier for this rejection.
+    ///
+    /// `{:?}` is unsuitable for aggregation because payload-carrying variants
+    /// render their contents — `HpAboveMax { max: 100 }` and
+    /// `HpAboveMax { max: 250 }` would land in different buckets and shatter the
+    /// drift histogram that §6.2 relies on as an early warning. Group on this.
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::UnknownSubject => "UnknownSubject",
+            Self::UnknownField => "UnknownField",
+            Self::MissingNumericValue => "MissingNumericValue",
+            Self::MissingTextValue => "MissingTextValue",
+            Self::TextFieldRequiresSet => "TextFieldRequiresSet",
+            Self::HpBelowZero => "HpBelowZero",
+            Self::HpAboveMax { .. } => "HpAboveMax",
+            Self::LevelWouldDecrease => "LevelWouldDecrease",
+            Self::XpWouldDecrease => "XpWouldDecrease",
+            Self::InventoryWouldGoNegative => "InventoryWouldGoNegative",
+            Self::UnknownEquipSlot => "UnknownEquipSlot",
+            Self::UnknownAppearTrait => "UnknownAppearTrait",
+        }
+    }
+}
+
 /// `known_subjects` is the union of cast speakers, existing ledger subjects, and
 /// `lore` rows of kind `character`. Pass 2's `new_lore` is applied *before* its
 /// deltas, so a character introduced this chapter is already known here.

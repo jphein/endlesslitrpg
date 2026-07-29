@@ -233,6 +233,27 @@ struct definitions, no drift between server and firmware.
 
 Every stage is **idempotent by chapter number**; a crash resumes from the last completed stage.
 
+### 5.2 What the live model actually does (measured 2026-07-29, build `b950-555881e`)
+
+Three results from pinning the two-pass contract against `familiar:8091` rather than assuming:
+
+1. **`response_format: {"type":"json_schema", …}` is supported and genuinely enforced.** GBNF
+   `grammar` is not required. A schema the server cannot compile fails loudly with **HTTP 400** on the
+   first call rather than degrading quietly.
+2. **Qwen3.6 reasons by default, and the reasoning is *not* grammar-constrained.** So a
+   schema-constrained call with thinking enabled spends its budget reasoning and returns
+   `content: ""` with `finish_reason: "length"` — structured output that presents as the model having
+   said nothing at all. Thinking is therefore **disabled by default** on the extraction pass. No
+   amount of reading documentation would have surfaced this interaction.
+3. **Pass 1's real output is *block* shaped**, not one tag per line: the speaker tag alone on its own
+   line, content on the lines beneath, a blank line closing the block. The parser accepts **both**
+   shapes, since the line-per-tag form is what the prompt asks for and the block form is what the
+   model tends to produce.
+
+Consequence for §10: an empty `content` is *not* interchangeable with a network failure. The error
+type distinguishes them, because "the model reasoned itself out of budget" wants a retry with
+thinking off, while a network failure wants backoff.
+
 ---
 
 ## 6. Data model

@@ -224,7 +224,8 @@ Every stage is **idempotent by chapter number**; a crash resumes from the last c
 ## 6. Data model
 
 ```sql
-story    (id, title, prompt_path, prompt_hash, arc_outline_md, target_words, updated_at)
+story    (id, title, protagonist, prompt_path, prompt_hash, arc_outline_md,
+          target_words, updated_at)
 chapters (id, number, title, text_md, prompt_hash, pcm_path, mp3_path,
           manifest_json, duration_ms, has_audio, state_dirty, created_at)
 segments (id, chapter_id, idx, speaker, text, voice_ref, start_ms, end_ms)
@@ -244,6 +245,12 @@ Stated explicitly so implementation has nothing to guess:
 |---|---|
 | `story.target_words` | **2000** — ≈13 min of audio at ~150 wpm narration. Tunable per story |
 | `ledger.op` | `set` \| `add` \| `sub` (`set` writes `value_num`/`value_txt` absolutely; `add`/`sub` are relative and numeric only) |
+| numeric fields | `hp`, `max_hp`, `level`, `xp`, `gold` |
+| text fields | `location`, `status` |
+| `inv:<item>` | inventory counts, numeric, non-negative. Free-form item names |
+| `equip:<slot>` | equipped item name, text, **Set-only**. Slot is whitelisted (see below); empty string means the slot is empty |
+| `appear:<trait>` | appearance descriptor, text, **Set-only**. Whitelisted: `hair`, `eyes`, `skin`, `build`, `height`, `notable` |
+| equipment slots | `head`, `chest`, `legs`, `feet`, `hands`, `cloak`, `main_hand`, `off_hand`, `amulet`, `ring1`, `ring2` |
 | `cast.kind` | `narrator` \| `character` \| `system` |
 | `lore.kind` | `character` \| `place` \| `item` \| `faction` \| `rule` |
 | `summaries.level` | `0` chapter · `1` arc · `2` book |
@@ -273,6 +280,9 @@ Applied before anything is written:
 - `level` monotonic non-decreasing.
 - `xp` non-decreasing.
 - Inventory counts non-negative.
+- **Equipment slot whitelisted** — `equip:third_arm` is rejected. Each slot maps to a row on the
+  character screen (§9.4.1), so an invented slot would silently break the renderer.
+- **Appearance trait whitelisted** — same reasoning: the screen layout stays stable.
 - Unknown `subject` rejected (prevents the model inventing a character sheet by typo).
 
 Rejections are **stored, not discarded**. A rising `applied=0` rate is an early warning that the
@@ -443,6 +453,7 @@ highlighting.
 | `POST /api/notes` | director notes (CLI, watch PTT, Candela) |
 | `GET /api/voices` | aggregated across plugins — drives cast selection UI |
 | `GET /api/state` | derived ledger snapshot, for a status pane |
+| `GET /api/character/{subject}` | one subject's stats, equipment and appearance — watch screens (§9.4.1) |
 | `GET /healthz` | liveness |
 
 Plain HTTP with **no TLS and no DNS** is a hard requirement inherited from the watch, which is why
@@ -482,6 +493,40 @@ directly (D8 puts it on the same `/24`, so no gatekeeper rule).
 - **Director notes by voice** — push-to-talk → existing STT gateway → `POST /api/notes`.
 - **Must handle the amp-gate deadlock** documented in the read-aloud spec's §6.2, or this ships silent
   while logging success.
+
+### 9.4.1 Watch character and stats screens
+
+Two additional pages in the Story app, both fed by `GET /api/character/{subject}` with `subject`
+defaulting to `story.protagonist`.
+
+**Stats screen** — nearly free, because the ledger fold already produces exactly this data. Level, XP
+(with progress to next), HP as a bar against `max_hp`, gold, `location`, `status`, and inventory
+counts. It is a *rendering* of the derived snapshot; it holds no state of its own and cannot disagree
+with the story.
+
+**Character screen** — the protagonist's appearance and what they are wearing and wielding: the
+whitelisted `appear:*` traits plus all eleven `equip:*` slots with their current item names.
+
+**Render strategy — text-and-icon panel first.** The default is a slot list plus appearance lines
+drawn with Slint / `embedded-graphics` primitives: zero image assets, zero new pipeline, and correct
+the moment the ledger has data. This is what Phase 2 builds.
+
+**A composited portrait is a deliberate Phase 2b, not a Phase 2 goal.** If it happens, it follows the
+same principle as the audio path — *own both ends and ship the exact bytes the hardware wants*: the
+daemon composites layered art into **RGB565** server-side and the watch blits it with no decode, no
+resize, and no image library. The existing Slint renderer already streams two-line RGB565 strips
+(~1.6 KB) straight to panel GRAM, so a portrait stream reuses a proven path rather than inventing one.
+An endpoint shape is reserved (`GET /media/portrait/{subject}.rgb565`) so the door stays open.
+
+Reasons it stays deferred rather than promised: 512 KB SRAM with no PSRAM means a full 410×502 RGB565
+frame is ~412 KB and cannot be held whole, so it must stream in strips; the flash budget is already
+committed to two 6 MB OTA slots; and layered character art does not exist yet. None of that is
+blocking — it is simply a separate piece of work with its own art dependency.
+
+**Why the whitelists in §6.2 matter here.** Each `equip:` slot is a row on this screen and each
+`appear:` trait is a line. If Ember could invent `equip:third_arm`, the screen would either drop data
+silently or need defensive layout code forever. Rejecting at the gate keeps the renderer simple and
+makes the failure visible in the `applied=0` audit trail instead of on glass.
 
 ### 9.5 Battery instrumentation (D9)
 

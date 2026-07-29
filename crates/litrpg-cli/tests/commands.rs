@@ -202,6 +202,115 @@ fn cast_set_honours_an_explicit_kind() {
 }
 
 #[test]
+fn a_miscased_kind_is_canonicalised_rather_than_stored_as_given() {
+    // `known_subjects` excludes narrator and SYSTEM with SQL literals
+    // (`kind NOT IN ('narrator','system')`). `--kind System` stored verbatim would not
+    // match, re-admitting SYSTEM as a delta subject — verified before the fix:
+    // known_subjects returned {"Kaelen", "SYSTEM"}. The gate then accepts a whole stat
+    // block under subject "SYSTEM" with every stage reporting success.
+    let s = store();
+    s.upsert_story(&litrpg_store::NewStory {
+        title: "T".into(),
+        protagonist: "Kaelen".into(),
+        prompt_path: "prompt.md".into(),
+        prompt_hash: "h".into(),
+        target_words: 2000,
+    })
+    .unwrap();
+
+    for given in ["System", "SYSTEM", " system ", "SyStEm"] {
+        let s = store();
+        s.upsert_story(&litrpg_store::NewStory {
+            title: "T".into(),
+            protagonist: "Kaelen".into(),
+            prompt_path: "prompt.md".into(),
+            prompt_hash: "h".into(),
+            target_words: 2000,
+        })
+        .unwrap();
+        cast::set(&s, "SYSTEM", "sherpa:x:0", true, Some(given)).unwrap();
+        assert_eq!(
+            cast::list(&s).unwrap().entries[0].kind,
+            "system",
+            "{given:?} should canonicalise"
+        );
+        assert!(
+            !s.known_subjects().unwrap().contains("SYSTEM"),
+            "{given:?} let SYSTEM become a delta subject"
+        );
+    }
+}
+
+#[test]
+fn a_misspelt_kind_is_refused_before_anything_is_written() {
+    // A typo must not silently become a new kind that matches none of the store's
+    // filters. `narrater` previously admitted the narrator as a delta subject.
+    let s = store();
+    // Note "Character " is absent: input is trimmed and lower-cased by design, so it
+    // canonicalises rather than failing. Only values outside core's enum are refused.
+    for bad in [
+        "narrater",
+        "sytsem",
+        "person",
+        "",
+        "narrator character",
+        "syst em",
+    ] {
+        let err = cast::set(&s, "Someone", "sherpa:x:0", true, Some(bad)).unwrap_err();
+        assert!(
+            matches!(err, CliError::UnknownKind { .. }),
+            "{bad:?} should be refused, got {err:?}"
+        );
+        assert!(
+            cast::list(&s).unwrap().entries.is_empty(),
+            "{bad:?} must not have written a row"
+        );
+    }
+}
+
+#[test]
+fn the_refusal_names_the_kinds_it_accepts() {
+    let s = store();
+    let err = cast::set(&s, "Someone", "sherpa:x:0", true, Some("person")).unwrap_err();
+    let msg = err.to_string();
+    for k in ["narrator", "character", "system"] {
+        assert!(msg.contains(k), "{k} missing from: {msg}");
+    }
+    assert!(msg.contains("own stats"), "must say why it matters:\n{msg}");
+}
+
+#[test]
+fn the_default_kind_is_cores_canonical_form() {
+    // Derived from `SpeakerKind`, not written out as a fifth copy of the list.
+    assert_eq!(cast::default_kind(), "character");
+    let s = store();
+    cast::set(&s, "Vessa", "sherpa:x:0", true, None).unwrap();
+    assert_eq!(cast::list(&s).unwrap().entries[0].kind, "character");
+}
+
+#[test]
+fn a_narrator_cast_row_is_still_excluded_from_delta_subjects() {
+    // The other half of the same filter: narrator gets a cast row because it needs a
+    // voice, but it is not a person who can own stats.
+    let s = store();
+    s.upsert_story(&litrpg_store::NewStory {
+        title: "T".into(),
+        protagonist: "Kaelen".into(),
+        prompt_path: "prompt.md".into(),
+        prompt_hash: "h".into(),
+        target_words: 2000,
+    })
+    .unwrap();
+    cast::set(&s, "narrator", "sherpa:x:0", true, Some("Narrator")).unwrap();
+    let known = s.known_subjects().unwrap();
+    assert!(!known.contains("narrator"), "{known:?}");
+    assert!(
+        known.contains("Kaelen"),
+        "the protagonist must still be known"
+    );
+}
+
+#[test]
 fn cast_set_validates_the_voice_ref_before_writing_anything() {
     let s = with_kaelen();
     for bad in ["novoice", ":empty-backend", "sherpa:", ""] {

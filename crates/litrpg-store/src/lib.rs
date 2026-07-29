@@ -41,6 +41,12 @@ pub enum StoreError {
     NoStoryRow,
     #[error("{0} is not in the cast")]
     UnknownSpeaker(String),
+    #[error("chapter {chapter} segment {idx} has an unrecognised kind {value:?}")]
+    InvalidSegmentKind {
+        chapter: u32,
+        idx: u32,
+        value: String,
+    },
     #[error("delta rejected: {0}")]
     Rejected(String),
 }
@@ -118,5 +124,13 @@ impl Store {
         )?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Run a statement directly. **Tests only** — it exists so a test can simulate the
+    /// hand-edit or bad migration that strict decoding defends against, which is
+    /// otherwise unreachable through the safe API.
+    #[doc(hidden)]
+    pub fn raw_execute_for_tests(&self, sql: &str) -> Result<usize> {
+        Ok(self.conn.execute(sql, [])?)
     }
 }

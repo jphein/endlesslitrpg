@@ -22,6 +22,49 @@ pub enum SpeakerKind {
     System,
 }
 
+impl SpeakerKind {
+    /// The canonical string form — the same one `serde(rename_all = "lowercase")`
+    /// produces, asserted by test so the two cannot drift.
+    ///
+    /// # Why this exists
+    ///
+    /// The same fact had four independent spellings: this serde attribute (inside every
+    /// `manifest_json` and every daemon response), the store's `kind_str`/`kind_from_str`
+    /// for the `segments.kind` column, the engine's own match, and the CLI's. They
+    /// agreed, and nothing made them.
+    ///
+    /// That mattered more than the filename convention did, because **kind selects the
+    /// voice** — the cast assigner maps `Narrator` and `System` to different voices from
+    /// `Character`. A drift between the manifest and the `segments` table means a
+    /// mis-voiced chapter, and the only symptom is *hearing the wrong person speak*.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Narrator => "narrator",
+            Self::Character => "character",
+            Self::System => "system",
+        }
+    }
+
+    /// Parse the canonical form. **Strict on purpose** — see [`SpeakerKind::as_str`].
+    ///
+    /// The store previously coerced anything unrecognised to `Narrator`, which is the
+    /// same destructive-default asymmetry that made `op_from_str` strict: a silent
+    /// fallback here re-voices a character as the narrator, and nothing reports it. If
+    /// the canonical casing ever changed, `"System"` would have quietly become
+    /// `Narrator`.
+    pub fn from_canonical(s: &str) -> Option<Self> {
+        match s {
+            "narrator" => Some(Self::Narrator),
+            "character" => Some(Self::Character),
+            "system" => Some(Self::System),
+            _ => None,
+        }
+    }
+
+    /// Every variant, for exhaustive tests and for iterating a cast.
+    pub const ALL: [Self; 3] = [Self::Narrator, Self::Character, Self::System];
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Segment {
     pub idx: u32,

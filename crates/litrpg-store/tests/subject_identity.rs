@@ -121,3 +121,47 @@ fn lore_characters_are_still_known() {
     .unwrap();
     assert!(s.known_subjects().unwrap().contains("Sera"));
 }
+
+/// A corrupt `segments.kind` fails loudly rather than becoming `Narrator`.
+///
+/// The store used to coerce anything unrecognised, and kind **selects the voice** — the
+/// cast assigner maps Narrator and System to different voices from Character. So a
+/// silent coercion re-voices a character, and the only symptom is hearing the wrong
+/// person speak. Same asymmetry that made `op_from_str` strict.
+#[test]
+fn an_unrecognised_segment_kind_is_an_error_not_a_narrator() {
+    use litrpg_core::manifest::{Manifest, Segment, SpeakerKind};
+    use litrpg_store::NewChapter;
+
+    let s = Store::open_in_memory().unwrap();
+    s.insert_chapter(&NewChapter {
+        number: 1,
+        title: "Chapter 1".into(),
+        text_md: "[Kaelen] \"Pay up.\"".into(),
+        prompt_hash: "fnv1a64:cbf29ce484222325".into(),
+        state_dirty: false,
+    })
+    .unwrap();
+    let m = Manifest::new(
+        1,
+        vec![Segment {
+            idx: 0,
+            speaker: "Kaelen".into(),
+            kind: SpeakerKind::Character,
+            voice_ref: "sherpa:kokoro-multi-lang-v1_0:18".into(),
+            text: "Pay up.".into(),
+            start_ms: 0,
+            end_ms: 1000,
+        }],
+    );
+    s.attach_audio(1, &m).unwrap();
+    assert_eq!(s.segments(1).unwrap()[0].kind, SpeakerKind::Character);
+
+    // Simulate a hand-edit, a bad migration, or a casing change in the canonical form.
+    s.raw_execute_for_tests("UPDATE segments SET kind = 'Character'")
+        .unwrap();
+
+    let err = s.segments(1).unwrap_err();
+    assert!(err.to_string().contains("unrecognised kind"), "{err}");
+    assert!(err.to_string().contains("Character"), "{err}");
+}

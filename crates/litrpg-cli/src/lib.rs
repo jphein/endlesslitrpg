@@ -37,6 +37,12 @@ pub enum CliError {
     #[error("invalid voice_ref {got:?}: {reason}")]
     BadVoiceRef { got: String, reason: String },
 
+    #[error(
+        "{got:?} is not a speaker kind ({allowed}). The narrator and SYSTEM are excluded \
+         from delta subjects by kind, so a misspelt one would let them own stats."
+    )]
+    UnknownKind { got: String, allowed: String },
+
     #[error("{speaker:?} is not in the cast — pass --new to add a new cast member")]
     UnknownSpeaker { speaker: String },
 

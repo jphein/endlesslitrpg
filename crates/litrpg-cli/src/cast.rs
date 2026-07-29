@@ -15,9 +15,56 @@ use crate::{CliError, Result};
 /// rather than as agreeing — silence is not evidence.
 pub const SUBSTITUTION_SCAN_LIMIT: usize = 20;
 
-/// Default `kind` for a deliberately-added cast member (§6.0 allows
-/// `narrator` | `character` | `system`).
-pub const DEFAULT_KIND: &str = "character";
+/// Canonicalise a `cast.kind` through `litrpg-core`'s own `SpeakerKind`.
+///
+/// # Why this validates instead of passing the string through
+///
+/// `Store::known_subjects` excludes the narrator and SYSTEM with SQL literals —
+/// `cast.kind NOT IN ('narrator', 'system')` — because neither is a person who can own
+/// stats. A live run once had the gate accept `subject: "SYSTEM"` and accrue a whole
+/// stat block to a pseudo-person while the protagonist's screen stayed empty, every
+/// stage reporting success. The store's filter is what closed that.
+///
+/// An unvalidated `--kind` re-opens it from this side: `--kind System` (capital S) does
+/// not match `'system'`, so SYSTEM is admitted as a valid subject again — silently, and
+/// with the same symptom. Verified before writing this: `known_subjects` returned
+/// `{"Kaelen", "SYSTEM"}`. A typo'd `--kind narrater` does the same for the narrator.
+///
+/// # Why through serde rather than a local match
+///
+/// Matching against a local list of three strings would make a fifth copy of a value
+/// that already exists four times in this workspace, which is precisely how `cast.kind`
+/// came to disagree with those SQL literals. Round-tripping through `SpeakerKind` means
+/// this crate *asks* core for the vocabulary instead of restating it, so the accepted
+/// set and the written form are core's by construction.
+///
+/// Input is lower-cased first, so `System` is accepted and stored as `system`; a
+/// misspelling is still refused.
+fn canonical_kind(kind: &str) -> Option<String> {
+    let parsed: litrpg_core::manifest::SpeakerKind =
+        serde_json::from_value(serde_json::Value::String(kind.trim().to_lowercase())).ok()?;
+    let quoted = serde_json::to_string(&parsed).ok()?;
+    Some(quoted.trim_matches('"').to_string())
+}
+
+/// The kinds `--kind` accepts, for error messages. Derived from core, not listed.
+fn allowed_kinds() -> String {
+    [
+        litrpg_core::manifest::SpeakerKind::Narrator,
+        litrpg_core::manifest::SpeakerKind::Character,
+        litrpg_core::manifest::SpeakerKind::System,
+    ]
+    .iter()
+    .filter_map(|k| serde_json::to_string(k).ok())
+    .map(|q| q.trim_matches('"').to_string())
+    .collect::<Vec<_>>()
+    .join(" | ")
+}
+
+/// Default `kind` for a deliberately-added cast member, in core's canonical form.
+pub fn default_kind() -> String {
+    canonical_kind("character").expect("Character is a SpeakerKind variant")
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CastEntry {
@@ -153,12 +200,18 @@ pub fn set(
             // A pre-assigned voice belongs to the chapter that has not been written
             // yet, hence latest + 1.
             let first_chapter = store.latest_number()?.saturating_add(1);
-            let kind = kind.unwrap_or(DEFAULT_KIND);
-            store.upsert_cast(speaker, voice_ref, kind, first_chapter)?;
+            let kind = match kind {
+                None => default_kind(),
+                Some(k) => canonical_kind(k).ok_or_else(|| CliError::UnknownKind {
+                    got: k.to_string(),
+                    allowed: allowed_kinds(),
+                })?,
+            };
+            store.upsert_cast(speaker, voice_ref, &kind, first_chapter)?;
             Ok(CastSetOutcome::Added {
                 speaker: speaker.to_string(),
                 voice_ref: voice_ref.to_string(),
-                kind: kind.to_string(),
+                kind,
                 first_chapter,
             })
         }

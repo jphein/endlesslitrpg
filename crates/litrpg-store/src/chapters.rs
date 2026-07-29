@@ -5,22 +5,6 @@ use rusqlite::params;
 
 use crate::{Result, Store, StoreError, now_ms};
 
-fn kind_str(k: SpeakerKind) -> &'static str {
-    match k {
-        SpeakerKind::Narrator => "narrator",
-        SpeakerKind::Character => "character",
-        SpeakerKind::System => "system",
-    }
-}
-
-fn kind_from_str(s: &str) -> SpeakerKind {
-    match s {
-        "character" => SpeakerKind::Character,
-        "system" => SpeakerKind::System,
-        _ => SpeakerKind::Narrator,
-    }
-}
-
 /// Input for inserting a chapter. Audio is attached separately, because text
 /// ships even when rendering fails (spec §10).
 #[derive(Debug, Clone)]
@@ -188,7 +172,7 @@ impl Store {
                     chapter_id,
                     s.idx,
                     s.speaker,
-                    kind_str(s.kind),
+                    s.kind.as_str(),
                     s.text,
                     s.voice_ref,
                     s.start_ms,
@@ -209,17 +193,44 @@ impl Store {
              WHERE c.number = ?1
              ORDER BY s.idx",
         )?;
-        let rows = stmt.query_map(params![number], |r| {
-            Ok(Segment {
-                idx: r.get::<_, i64>(0)? as u32,
-                speaker: r.get(1)?,
-                kind: kind_from_str(&r.get::<_, String>(2)?),
-                text: r.get(3)?,
-                voice_ref: r.get(4)?,
-                start_ms: r.get::<_, i64>(5)? as u32,
-                end_ms: r.get::<_, i64>(6)? as u32,
-            })
-        })?;
-        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        // Read raw, then decode in plain Rust, so an unrecognised kind can fail loudly
+        // rather than being coerced. This used to default to Narrator, which is the same
+        // destructive asymmetry that made `op_from_str` strict — and worse here, because
+        // kind selects the voice, so a silent coercion re-voices a character and the only
+        // symptom is hearing the wrong person speak.
+        let raw = stmt
+            .query_map(params![number], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, i64>(5)?,
+                    r.get::<_, i64>(6)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        let mut out = Vec::with_capacity(raw.len());
+        for (idx, speaker, kind, text, voice_ref, start_ms, end_ms) in raw {
+            let Some(kind) = SpeakerKind::from_canonical(&kind) else {
+                return Err(StoreError::InvalidSegmentKind {
+                    chapter: number,
+                    idx: idx as u32,
+                    value: kind,
+                });
+            };
+            out.push(Segment {
+                idx: idx as u32,
+                speaker,
+                kind,
+                text,
+                voice_ref,
+                start_ms: start_ms as u32,
+                end_ms: end_ms as u32,
+            });
+        }
+        Ok(out)
     }
 }

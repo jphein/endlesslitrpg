@@ -91,3 +91,44 @@ proptest! {
         prop_assert_eq!(m.total_bytes(), summed);
     }
 }
+
+/// The load-bearing test for [`SpeakerKind::as_str`]: the hand-written canonical form
+/// and serde's `rename_all = "lowercase"` must agree. They are two independent
+/// spellings of one fact, and this is the only thing making them match.
+///
+/// If serde's output ever changes — a rename, a different casing convention — this
+/// fails here rather than as a mis-voiced chapter noticed by ear weeks later.
+#[test]
+fn as_str_agrees_with_the_serde_representation() {
+    for kind in SpeakerKind::ALL {
+        let json = serde_json::to_string(&kind).unwrap();
+        let unquoted = json.trim_matches('"');
+        assert_eq!(
+            kind.as_str(),
+            unquoted,
+            "as_str and serde disagree for {kind:?} — kind selects the voice, so a drift \
+             here mis-voices a chapter"
+        );
+    }
+}
+
+#[test]
+fn from_canonical_round_trips_every_variant() {
+    for kind in SpeakerKind::ALL {
+        assert_eq!(SpeakerKind::from_canonical(kind.as_str()), Some(kind));
+    }
+}
+
+/// Strict on purpose. The store used to coerce anything unrecognised to `Narrator`,
+/// which would silently re-voice a character — the same destructive-default asymmetry
+/// that made `op_from_str` strict.
+#[test]
+fn from_canonical_rejects_anything_else() {
+    for bad in ["Narrator", "SYSTEM", "System", "", "narrater", "npc"] {
+        assert_eq!(
+            SpeakerKind::from_canonical(bad),
+            None,
+            "{bad:?} must not silently become a kind"
+        );
+    }
+}

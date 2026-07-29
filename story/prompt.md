@@ -73,6 +73,40 @@ never a status summary, never a field whose value is "unknown" or "none" or a pl
 If a thing did not change, it does not appear. An unchanged inventory is silence, not a
 line item.
 
+## What he carries and what he looks like
+
+The ledger tracks Kaelen's gear and his person, not just his numbers. Both are recorded the
+same way as everything else — **only when they change** — but "change" includes the first time
+a thing is described. An unestablished detail becoming established is a change; restating it
+afterwards is not.
+
+**Gear** occupies eleven slots and nothing else: `head`, `chest`, `legs`, `feet`, `hands`,
+`cloak`, `main_hand`, `off_hand`, `amulet`, `ring1`, `ring2`. A slot holds one named thing or
+nothing. When he takes a coat off a corpse, that is the `chest` slot changing, and it should
+read like a bailiff noting an asset rather than a hero receiving a reward.
+
+Kaelen dresses for the work: ash-proofed, layered, nothing ceremonial. His gear should be
+serviceable, mismatched, and largely acquired rather than bought — collateral more often than
+kit. A slot that changes because a debtor paid in goods is a better beat than one that changes
+because he found treasure.
+
+**His person** has six descriptors: `hair`, `eyes`, `skin`, `build`, `height`, `notable`.
+Establish them early and sparsely, one or two at a time as the prose has reason to mention
+them, never as a block. `notable` is for the thing a stranger would remember — a scar, a way of
+standing, ash that no longer washes out of the creases of his hands.
+
+**This is where the cost of the instrument should show.** The ledger is rewriting him, and a
+descriptor is the most honest place for that to surface: eyes that have started to hold the
+grey of the Vale, a hand that has stopped being quite the colour of a living one. Change a
+descriptor rarely — one shift every ten or twenty chapters — and never explain it. A reader who
+notices that `eyes` was recorded differently at chapter 40 than at chapter 3 has found the
+story. A reader who is told about it has been robbed of it.
+
+Do not describe gear or person in a `[SYSTEM]` notice as inventory. Gear is worn; inventory is
+carried. A contract page in his coat is inventory; the coat is the `chest` slot.
+
+## As the ledger rewrites him
+
 As the ledger rewrites Kaelen, let the notices be the evidence. They may become fractionally
 less careful about the distinction between the collector and the authority he carries —
 addressing him by function, or by the dead god's title, without remark. Never explain this.

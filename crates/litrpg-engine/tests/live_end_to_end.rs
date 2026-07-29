@@ -39,12 +39,16 @@ use litrpg_tts::{TtsBackend, TtsRegistry, azure::AzureBackend};
 /// backend (§7.3), so a sherpa ref against an Azure-only registry fails at render time.
 const AZURE_NARRATOR: &str = "azure:en-GB-Ada:DragonHDLatestNeural";
 const AZURE_SYSTEM: &str = "azure:en-US-Steffan:DragonHDLatestNeural";
-/// `en-GB-OllieMultilingual:DragonHDLatestNeural` is deliberately **absent**: it is in
-/// `litrpg-tts`'s curated `AZURE_VOICES` list but Azure answers **HTTP 400** for it
-/// (verified by `azure_renders_one_segment`). Because `render_all` fails the whole batch,
-/// one bad voice costs the entire chapter's audio — so it must not be in a pool.
+/// Four character voices, so a four-person cast does not have to double up.
+///
+/// The en-GB male is `en-GB-Ollie:DragonHDLatestNeural`. It was briefly absent because the
+/// curated list carried `en-GB-OllieMultilingual:DragonHDLatestNeural`, which Azure answers
+/// **HTTP 400** for — aurora found why: `OllieMultilingual` is a real *non*-DragonHD voice, so
+/// that entry was a valid voice name spliced onto the DragonHD suffix, naming nothing. Since
+/// `render_all` fails the whole batch, one such name costs an entire chapter's audio.
 const AZURE_CHARACTERS: &[&str] = &[
     "azure:en-US-Emma:DragonHDLatestNeural",
+    "azure:en-GB-Ollie:DragonHDLatestNeural",
     "azure:en-US-Andrew:DragonHDLatestNeural",
     "azure:en-US-Ava:DragonHDLatestNeural",
 ];

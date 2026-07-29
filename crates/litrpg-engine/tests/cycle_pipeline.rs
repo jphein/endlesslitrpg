@@ -85,12 +85,54 @@ async fn all_four_artifacts_are_written() {
     e.run_cycle(0).await.unwrap();
 
     let kinds = e.artifacts_kinds();
-    for want in ["pcm", "mp3", "manifest"] {
+    // Four, including the markdown. A real run had `.pcm`, `.mp3` and `.json` on disk and no
+    // `.md` at all, because `write_text` was never called -- and this test passed, because it
+    // was named "all four" while only checking three.
+    for want in ["text", "pcm", "mp3", "manifest"] {
         assert!(
             kinds.contains(&want.to_string()),
             "missing {want} in {kinds:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn the_chapter_markdown_is_written_even_when_the_render_fails() {
+    // §8 makes `NNNN.md` the canonical permanent artifact and §10 says text ships regardless
+    // of audio, so the two rules together mean the markdown must not be inside the render path.
+    let e = engine(
+        FakeGenerator::new(),
+        FakeRenderer::failing(),
+        FakeLibrary::new(),
+        FakeArtifacts::new(),
+    );
+    e.run_cycle(0).await.unwrap();
+
+    assert!(!e.has_audio(1));
+    assert!(
+        e.artifacts_kinds().contains(&"text".to_string()),
+        "the markdown must ship even with no audio: {:?}",
+        e.artifacts_kinds()
+    );
+}
+
+#[tokio::test]
+async fn a_failure_to_write_the_markdown_does_not_cost_the_chapter() {
+    // The prose is already durable in `chapters.text_md`; a full disk must not lose it.
+    let e = engine(
+        FakeGenerator::new(),
+        FakeRenderer::new(),
+        FakeLibrary::new(),
+        FakeArtifacts::failing_on("text"),
+    );
+    match e.run_cycle(0).await.unwrap() {
+        CycleOutcome::Produced { chapter, has_audio, .. } => {
+            assert_eq!(chapter, 1);
+            assert!(has_audio, "the audio path is independent of the markdown");
+        }
+        other => panic!("expected Produced, got {other:?}"),
+    }
+    assert!(!e.chapter_text(1).is_empty());
 }
 
 // ---------------------------------------------------------------------------

@@ -258,9 +258,54 @@ impl AzureConfig {
     }
 }
 
-/// A curated slice of the DragonHD family (103 of Azure's 769 voices). Treated as
-/// **config, not code**: `AzureBackend::with_voices` replaces the list, so adding
-/// a guest voice needs no code change.
+/// The curated Azure character pool: **20 voices, all verified live**, balanced
+/// 10 female / 10 male and 4 en-GB / 16 en-US.
+///
+/// Balance is deliberate, not cosmetic: the engine's cast assigner interleaves gender
+/// and accent groups, so a lopsided pool defeats it and characters start doubling up
+/// on one side. The pool was 6 usable character voices, and a four-character chapter
+/// already had two characters drawing the same voice.
+///
+/// ## Verified two ways, every entry
+///
+/// 1. **Catalog membership** — `GET /cognitiveservices/voices/list` (one request,
+///    validates the whole table). See `AzureBackend::fetch_catalog`.
+/// 2. **Live synthesis** — a one-word render per voice, 34 candidates checked,
+///    34 passed. Gender and locale below are Azure's **own** catalog metadata, not a
+///    guess from the name.
+///
+/// Both checks are `#[ignore]`d tests in `tests/azure_live.rs`. Run them after editing
+/// this table — an unverified entry here previously cost a chapter's audio.
+///
+/// ## What is deliberately excluded
+///
+/// - **`en-GB-OllieMultilingual:DragonHDLatestNeural`** — never existed. It was
+///   `en-GB-OllieMultilingualNeural` (a real *non*-DragonHD voice) spliced onto the
+///   DragonHD suffix, and Azure answers a made-up name with HTTP 400. The real voice
+///   is `en-GB-Ollie:DragonHDLatestNeural`, present below. **A 400 from Azure means
+///   "check the name" before it means "voice unavailable".**
+/// - **`-Preview` and numeric-suffix variants** (`Andrew-Preview`, `Andrew2`,
+///   `Andrew3`, `Ava-Preview`, `Ava3`, `Emma2`, `Serena-Preview`). All verified
+///   working, all excluded: two near-identical voices are worse than a smaller pool,
+///   because the assigner will confidently hand both out and they read as one person.
+///   Distinguishing them needs a listening test, which is not something this crate
+///   can do.
+/// - **`DragonHDFlash` and `DragonHDOmni`** — separate model series. All 8 verified
+///   working (`Jimmie`/`Tiana`/`Tyler` Flash; `Andrew`/`Caleb`/`Dana`/`Lewis`/`Phoebe`
+///   Omni), but kept out of the default pool: mixing series inside one chapter is a
+///   timbre-and-loudness consistency risk of exactly the kind the fused-`loudnorm`
+///   defect turned out to be. Add them via `AzureBackend::with_voices` once a chapter
+///   has been listened to end to end.
+/// - **`en-US-Davis`** — reserved as JP's orchestrator voice (`agent-orchestration`).
+///   Not a technical limit: hearing it narrate a character would muddy the by-voice
+///   classification JP relies on when agents speak. Mirror-image reasoning keeps
+///   **`en-GB-Ada`** available as the narrator — it is Ember's roster voice, so the
+///   local model narrating in it preserves the accent signature.
+/// - **`en-Multitalker`** and the lowercase Omni novelty ids (`en-us-jelly`,
+///   `en-us-blushzephyr`, …) — not single-character voices.
+///
+/// Verified spares, available by editing this list: female `Evelyn`, `Jenny`, `Mila`,
+/// `Serena`, `Tiana`; male `Jimmie`. All returned 200 with real audio.
 const DRAGONHD_VOICES: &[(&str, &str, &str, Gender)] = &[
     (
         "en-GB-Ada:DragonHDLatestNeural",
@@ -269,10 +314,28 @@ const DRAGONHD_VOICES: &[(&str, &str, &str, Gender)] = &[
         Gender::Female,
     ),
     (
-        "en-GB-OllieMultilingual:DragonHDLatestNeural",
+        "en-GB-Sonia:DragonHDLatestNeural",
+        "Sonia (DragonHD)",
+        "en-GB",
+        Gender::Female,
+    ),
+    (
+        "en-GB-Ollie:DragonHDLatestNeural",
         "Ollie (DragonHD)",
         "en-GB",
         Gender::Male,
+    ),
+    (
+        "en-GB-Ryan:DragonHDLatestNeural",
+        "Ryan (DragonHD)",
+        "en-GB",
+        Gender::Male,
+    ),
+    (
+        "en-US-Aria:DragonHDLatestNeural",
+        "Aria (DragonHD)",
+        "en-US",
+        Gender::Female,
     ),
     (
         "en-US-Ava:DragonHDLatestNeural",
@@ -281,10 +344,10 @@ const DRAGONHD_VOICES: &[(&str, &str, &str, Gender)] = &[
         Gender::Female,
     ),
     (
-        "en-US-Andrew:DragonHDLatestNeural",
-        "Andrew (DragonHD)",
+        "en-US-Bree:DragonHDLatestNeural",
+        "Bree (DragonHD)",
         "en-US",
-        Gender::Male,
+        Gender::Female,
     ),
     (
         "en-US-Emma:DragonHDLatestNeural",
@@ -293,18 +356,175 @@ const DRAGONHD_VOICES: &[(&str, &str, &str, Gender)] = &[
         Gender::Female,
     ),
     (
+        "en-US-Jane:DragonHDLatestNeural",
+        "Jane (DragonHD)",
+        "en-US",
+        Gender::Female,
+    ),
+    (
+        "en-US-Nova:DragonHDLatestNeural",
+        "Nova (DragonHD)",
+        "en-US",
+        Gender::Female,
+    ),
+    (
+        "en-US-Phoebe:DragonHDLatestNeural",
+        "Phoebe (DragonHD)",
+        "en-US",
+        Gender::Female,
+    ),
+    (
+        "en-US-Tessa:DragonHDLatestNeural",
+        "Tessa (DragonHD)",
+        "en-US",
+        Gender::Female,
+    ),
+    (
+        "en-US-Adam:DragonHDLatestNeural",
+        "Adam (DragonHD)",
+        "en-US",
+        Gender::Male,
+    ),
+    (
+        "en-US-Alloy:DragonHDLatestNeural",
+        "Alloy (DragonHD)",
+        "en-US",
+        Gender::Male,
+    ),
+    (
+        "en-US-Andrew:DragonHDLatestNeural",
+        "Andrew (DragonHD)",
+        "en-US",
+        Gender::Male,
+    ),
+    (
+        "en-US-Brian:DragonHDLatestNeural",
+        "Brian (DragonHD)",
+        "en-US",
+        Gender::Male,
+    ),
+    (
+        "en-US-Juno:DragonHDLatestNeural",
+        "Juno (DragonHD)",
+        "en-US",
+        Gender::Male,
+    ),
+    (
         "en-US-Steffan:DragonHDLatestNeural",
         "Steffan (DragonHD)",
         "en-US",
         Gender::Male,
     ),
+    (
+        "en-US-Tyler:DragonHDLatestNeural",
+        "Tyler (DragonHD)",
+        "en-US",
+        Gender::Male,
+    ),
+    (
+        "en-US-Vance:DragonHDLatestNeural",
+        "Vance (DragonHD)",
+        "en-US",
+        Gender::Male,
+    ),
 ];
+
+/// Same-locale, same-gender substitutes, used only when a fallback is explicitly
+/// enabled (see [`AzureConfig::fallback_on_reject`]).
+const FALLBACK_BY_LOCALE: &[(&str, Gender, &str)] = &[
+    ("en-GB", Gender::Female, "en-GB-Ada:DragonHDLatestNeural"),
+    ("en-GB", Gender::Male, "en-GB-Ollie:DragonHDLatestNeural"),
+    ("en-US", Gender::Female, "en-US-Ava:DragonHDLatestNeural"),
+    ("en-US", Gender::Male, "en-US-Andrew:DragonHDLatestNeural"),
+];
+
+/// The verdict of an Azure-side cast preflight.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VoicePreflight {
+    /// Azure's catalog lists this voice in this region.
+    Ok { voice_ref: String },
+    /// Well-formed and attribute-safe, but **Azure has never heard of it**. This is
+    /// the `en-GB-OllieMultilingual` failure; it renders as HTTP 400 at synthesis.
+    NotInCatalog {
+        voice_ref: String,
+        region: String,
+        /// Closest catalog entry, when one is obviously similar.
+        suggestion: Option<String>,
+    },
+    /// The `voice_ref` names a different backend.
+    WrongBackend { voice_ref: String, backend: String },
+    /// Unparseable, or a name that could inject SSML markup.
+    Malformed { voice_ref: String, reason: String },
+}
+
+impl VoicePreflight {
+    pub fn is_ok(&self) -> bool {
+        matches!(self, Self::Ok { .. })
+    }
+
+    pub fn voice_ref(&self) -> &str {
+        match self {
+            Self::Ok { voice_ref }
+            | Self::NotInCatalog { voice_ref, .. }
+            | Self::WrongBackend { voice_ref, .. }
+            | Self::Malformed { voice_ref, .. } => voice_ref,
+        }
+    }
+}
+
+impl core::fmt::Display for VoicePreflight {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Ok { voice_ref } => write!(f, "{voice_ref}: ok"),
+            Self::NotInCatalog {
+                voice_ref,
+                region,
+                suggestion,
+            } => {
+                write!(f, "{voice_ref}: not in the Azure catalog for {region}")?;
+                if let Some(s) = suggestion {
+                    write!(f, " (did you mean '{s}'?)")?;
+                }
+                Ok(())
+            }
+            Self::WrongBackend { voice_ref, backend } => {
+                write!(f, "{voice_ref}: belongs to backend '{backend}', not azure")
+            }
+            Self::Malformed { voice_ref, reason } => write!(f, "{voice_ref}: {reason}"),
+        }
+    }
+}
+
+/// Closest catalog entry by shared prefix — enough to turn "not in the catalog" into
+/// "you wrote `en-GB-OllieMultilingual:…`, Azure has `en-GB-Ollie:…`".
+fn nearest_name(name: &str, catalog: &[String]) -> Option<String> {
+    let shared = |a: &str, b: &str| a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count();
+    catalog
+        .iter()
+        .map(|c| (shared(name, c), c))
+        .filter(|(n, _)| *n >= 8)
+        .max_by_key(|(n, _)| *n)
+        .map(|(_, c)| c.clone())
+}
 
 /// The Azure DragonHD backend.
 pub struct AzureBackend {
     config: AzureConfig,
     client: reqwest::Client,
     voices: Vec<VoiceDesc>,
+    /// Substitute a known-good voice when Azure **rejects** one (HTTP 4xx).
+    ///
+    /// **Off by default, deliberately.** Voices are per-character persisted state
+    /// (spec §7.3) — that persistence is what makes a cast feel like continuity
+    /// rather than a lottery. Silently recasting a character for one chapter breaks
+    /// exactly the property the design exists to protect, and does it invisibly.
+    ///
+    /// With per-segment isolation and [`AzureBackend::preflight`], a bad voice now
+    /// costs one segment and is catchable at cast-assignment time, so this is a third
+    /// line of defence rather than the main one. Enable it when finishing a chapter
+    /// matters more than keeping a character's voice stable; every substitution is
+    /// logged to stderr.
+    fallback_on_reject: bool,
 }
 
 impl AzureBackend {
@@ -319,7 +539,16 @@ impl AzureBackend {
             config,
             client,
             voices,
+            fallback_on_reject: false,
         }
+    }
+
+    /// Enable same-locale, same-gender voice substitution on an Azure 4xx.
+    /// See [`AzureBackend::fallback_on_reject`] for why this is opt-in.
+    #[must_use]
+    pub fn with_fallback_on_reject(mut self, enabled: bool) -> Self {
+        self.fallback_on_reject = enabled;
+        self
     }
 
     /// Build from `AZURE_SPEECH_KEY` / `~/.config/speech-to-cli/config.json`.
@@ -336,6 +565,126 @@ impl AzureBackend {
 
     pub fn config(&self) -> &AzureConfig {
         &self.config
+    }
+
+    /// Whether a rejected voice falls back to a substitute. Off unless opted in.
+    pub fn fallback_on_reject(&self) -> bool {
+        self.fallback_on_reject
+    }
+
+    /// Every voice name Azure itself reports for this region, from
+    /// `GET /cognitiveservices/voices/list`.
+    ///
+    /// **This is the Azure-side preflight.** sherpa cannot ship a bad cast because
+    /// [`crate::sherpa::SherpaConfig::preflight`] refuses to load an incomplete model
+    /// up front; Azure had no equivalent, so a made-up voice name was only discovered
+    /// at render time, mid-chapter. One request validates every name a cast could
+    /// draw — far cheaper than N synthesis calls, and authoritative rather than
+    /// curated.
+    ///
+    /// Costs one metered-tier-free catalog request and no synthesis.
+    pub async fn fetch_catalog(&self) -> Result<Vec<String>> {
+        #[derive(Deserialize)]
+        struct Entry {
+            #[serde(rename = "ShortName")]
+            short_name: String,
+        }
+        let url = format!(
+            "https://{}.tts.speech.microsoft.com/cognitiveservices/voices/list",
+            self.config.region
+        );
+        let resp = self
+            .client
+            .get(&url)
+            .header("Ocp-Apim-Subscription-Key", &self.config.key)
+            .header("User-Agent", "litrpg-tts")
+            .send()
+            .await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(TtsError::HttpStatus {
+                status: status.as_u16(),
+                body: body.chars().take(300).collect(),
+            });
+        }
+        let entries: Vec<Entry> = resp.json().await?;
+        Ok(entries.into_iter().map(|e| e.short_name).collect())
+    }
+
+    /// Check cast voice refs against Azure's catalog **before the first render**.
+    ///
+    /// Returns one verdict per input, in order. The engine should call this at
+    /// cast-assignment time: a bad voice then is a config fix, whereas the same bad
+    /// voice at render time is a lost chapter.
+    pub async fn preflight(&self, voice_refs: &[&str]) -> Result<Vec<VoicePreflight>> {
+        let catalog = self.fetch_catalog().await?;
+        Ok(voice_refs
+            .iter()
+            .map(|vr| self.preflight_one(vr, &catalog))
+            .collect())
+    }
+
+    /// [`AzureBackend::preflight`] against an already-fetched catalog, so a whole
+    /// cast costs one request.
+    pub fn preflight_one(&self, voice_ref: &str, catalog: &[String]) -> VoicePreflight {
+        let name = match litrpg_core::VoiceRef::parse(voice_ref) {
+            Ok(v) if v.backend == "azure" => v.remainder,
+            Ok(v) => {
+                return VoicePreflight::WrongBackend {
+                    voice_ref: voice_ref.to_string(),
+                    backend: v.backend,
+                };
+            }
+            Err(e) => {
+                return VoicePreflight::Malformed {
+                    voice_ref: voice_ref.to_string(),
+                    reason: e.to_string(),
+                };
+            }
+        };
+        if AzureConfig::validate_voice_name(&name).is_err() {
+            return VoicePreflight::Malformed {
+                voice_ref: voice_ref.to_string(),
+                reason: "voice name is not attribute-safe".into(),
+            };
+        }
+        if catalog.iter().any(|c| c == &name) {
+            VoicePreflight::Ok {
+                voice_ref: voice_ref.to_string(),
+            }
+        } else {
+            // The exact failure that cost a chapter: a plausible-looking name that
+            // Azure has never heard of.
+            VoicePreflight::NotInCatalog {
+                voice_ref: voice_ref.to_string(),
+                region: self.config.region.clone(),
+                suggestion: nearest_name(&name, catalog),
+            }
+        }
+    }
+
+    /// A same-locale, same-gender substitute drawn from the curated table, or `None`.
+    fn fallback_for(&self, voice_ref: &str) -> Option<String> {
+        let name = litrpg_core::VoiceRef::parse(voice_ref).ok()?.remainder;
+        let desc = DRAGONHD_VOICES.iter().find(|(n, ..)| *n == name);
+        let (lang, gender) = match desc {
+            Some((_, _, lang, gender)) => (*lang, *gender),
+            // Unknown voice: infer the locale from the name prefix, guess female.
+            None => (
+                if name.starts_with("en-GB") {
+                    "en-GB"
+                } else {
+                    "en-US"
+                },
+                Gender::Female,
+            ),
+        };
+        FALLBACK_BY_LOCALE
+            .iter()
+            .find(|(l, g, sub)| *l == lang && *g == gender && *sub != name)
+            .or_else(|| FALLBACK_BY_LOCALE.iter().find(|(_, _, sub)| *sub != name))
+            .map(|(_, _, sub)| (*sub).to_string())
     }
 
     fn default_voices(config: &AzureConfig) -> Vec<VoiceDesc> {
@@ -369,6 +718,39 @@ impl AzureBackend {
             AzureConfig::validate_voice_name(&r.voice.remainder)?;
         }
         Ok(())
+    }
+
+    /// Render one segment, optionally retrying a **rejected voice** with a substitute.
+    ///
+    /// The retry fires only on HTTP 4xx — Azure saying "that voice is wrong" — never
+    /// on a 5xx or a network error, where the voice is fine and the right response is
+    /// to retry the same voice later rather than silently recast a character.
+    async fn render_one(&self, req: &RenderRequest) -> Result<Pcm16k> {
+        match self.post_ssml(build_ssml(req)).await {
+            Err(TtsError::HttpStatus { status, body }) if (400..500).contains(&status) => {
+                let Some(sub) = self
+                    .fallback_on_reject
+                    .then(|| self.fallback_for(&req.voice.to_string()))
+                    .flatten()
+                else {
+                    return Err(TtsError::HttpStatus { status, body });
+                };
+                let mut retry = req.clone();
+                retry.voice = litrpg_core::VoiceRef {
+                    backend: "azure".into(),
+                    remainder: sub.clone(),
+                };
+                // Loud on purpose: a voice substitution is a story-continuity event,
+                // not a transparent recovery. See `AzureConfig::fallback_on_reject`.
+                eprintln!(
+                    "litrpg-tts: azure rejected voice '{}' ({status}) for segment {}; \
+                     falling back to '{sub}'. The cast table should be fixed.",
+                    req.voice.remainder, req.idx
+                );
+                self.post_ssml(build_ssml(&retry)).await
+            }
+            other => other,
+        }
     }
 
     /// POST one SSML document and return the raw PCM body.
@@ -428,7 +810,7 @@ impl TtsBackend for AzureBackend {
         if req.is_blank() {
             return Ok(Pcm16k::empty());
         }
-        self.post_ssml(build_ssml(req)).await
+        self.render_one(req).await
     }
 
     /// Per-segment PCM, rendered with bounded concurrency over one pooled HTTP/2
@@ -441,30 +823,49 @@ impl TtsBackend for AzureBackend {
     /// answer "where does segment 4 end", and anything writing a manifest needs
     /// exactly that. The batching win Azure *can* deliver here is concurrency;
     /// the one-request shape lives in [`TtsBackend::render_joined`].
-    async fn render_batch(&self, reqs: &[RenderRequest]) -> Result<Vec<Pcm16k>> {
-        Self::check(reqs)?;
-        let mut out: Vec<Option<Pcm16k>> = vec![None; reqs.len()];
+    async fn render_batch_partial(&self, reqs: &[RenderRequest]) -> Vec<Result<Pcm16k>> {
+        let mut out: Vec<Option<Result<Pcm16k>>> = (0..reqs.len()).map(|_| None).collect();
 
         let positions: Vec<usize> = (0..reqs.len()).collect();
         for chunk in positions.chunks(BATCH_CONCURRENCY) {
             let mut set = tokio::task::JoinSet::new();
             for &pos in chunk {
                 let r = &reqs[pos];
-                if r.is_blank() {
-                    out[pos] = Some(Pcm16k::empty());
+                // Per-segment validation, so one unsafe voice name costs one segment
+                // rather than the whole batch.
+                if let Err(e) = AzureConfig::validate_voice_name(&r.voice.remainder) {
+                    out[pos] = Some(Err(e));
                     continue;
                 }
-                let ssml = build_ssml(r);
+                if r.is_blank() {
+                    out[pos] = Some(Ok(Pcm16k::empty()));
+                    continue;
+                }
                 let this = self.clone_handle();
-                set.spawn(async move { (pos, this.post_ssml(ssml).await) });
+                let req = r.clone();
+                set.spawn(async move { (pos, this.render_one(&req).await) });
             }
             while let Some(joined) = set.join_next().await {
-                let (pos, result) = joined.map_err(|e| TtsError::Worker(e.to_string()))?;
-                out[pos] = Some(result?);
+                match joined {
+                    Ok((pos, result)) => out[pos] = Some(result),
+                    // A panicked task must not poison the rest of the batch.
+                    Err(e) => {
+                        if let Some(slot) = out.iter_mut().find(|s| s.is_none()) {
+                            *slot = Some(Err(TtsError::Worker(e.to_string())));
+                        }
+                    }
+                }
             }
         }
 
-        Ok(out.into_iter().map(Option::unwrap_or_default).collect())
+        out.into_iter()
+            .enumerate()
+            .map(|(i, slot)| {
+                slot.unwrap_or_else(|| {
+                    Err(TtsError::Worker(format!("segment {i} produced no outcome")))
+                })
+            })
+            .collect()
     }
 
     /// **One** multi-voice SSML request for the whole batch (spec §7.2).
@@ -489,6 +890,7 @@ impl AzureBackend {
             config: self.config.clone(),
             client: self.client.clone(),
             voices: Vec::new(),
+            fallback_on_reject: self.fallback_on_reject,
         }
     }
 }

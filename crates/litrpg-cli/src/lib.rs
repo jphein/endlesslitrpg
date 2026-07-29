@@ -12,7 +12,9 @@ use thiserror::Error;
 pub mod cast;
 pub mod init;
 pub mod note;
+pub mod play;
 pub mod prompt;
+pub mod read;
 pub mod render;
 pub mod rewind;
 pub mod state;
@@ -49,6 +51,27 @@ pub enum CliError {
         status: String,
         path: PathBuf,
     },
+
+    #[error("no chapters yet — the engine has not written one")]
+    NoChapters,
+
+    #[error("chapter {wanted} does not exist; the latest is {latest}")]
+    NoSuchChapter { wanted: u32, latest: u32 },
+
+    #[error(
+        "chapter {chapter} has no audio yet — its text shipped but the render did not \
+         (spec §10). `litrpg status` shows whether it is queued for retry."
+    )]
+    ChapterHasNoAudio { chapter: u32 },
+
+    #[error("chapter {chapter} is recorded as having audio, but its media is unusable — {looked}")]
+    AudioFileMissing { chapter: u32, looked: String },
+
+    #[error("no usable audio player found (tried: {tried})")]
+    NoPlayer { tried: String },
+
+    #[error("player {cmd:?} exited unsuccessfully ({status})")]
+    PlayerFailed { cmd: String, status: String },
 
     #[error("i/o error on {path}")]
     Io {

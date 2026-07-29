@@ -165,4 +165,82 @@ impl TtsRegistry {
 
         Ok(out.into_iter().map(|p| p.unwrap_or_default()).collect())
     }
+
+    /// Render a mixed-backend chapter with **per-segment failure isolation**.
+    ///
+    /// Returns exactly one outcome per request, in order. Unlike
+    /// [`TtsRegistry::render_all`], nothing is discarded because something else
+    /// failed: an unknown backend, an unavailable backend, or a voice one plugin
+    /// rejects costs **that segment** and no more.
+    ///
+    /// This is what spec §10's "a TTS failure degrades" actually requires. The
+    /// strict version made one bad voice out of ten cost all ten segments' audio.
+    /// The engine can now ship the nine, mark the tenth `has_audio = false`, and
+    /// retry it later.
+    pub async fn render_all_partial(&self, reqs: &[RenderRequest]) -> Vec<Result<Pcm16k>> {
+        if reqs.is_empty() {
+            return Vec::new();
+        }
+
+        // Group by backend id, preserving first-seen order.
+        let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
+        for (pos, r) in reqs.iter().enumerate() {
+            match groups.iter_mut().find(|(id, _)| *id == r.voice.backend) {
+                Some((_, idxs)) => idxs.push(pos),
+                None => groups.push((r.voice.backend.clone(), vec![pos])),
+            }
+        }
+
+        let mut out: Vec<Option<Result<Pcm16k>>> = (0..reqs.len()).map(|_| None).collect();
+        for (id, idxs) in groups {
+            // A resolution failure is charged to that backend's segments only.
+            let backend = match self.get(&id) {
+                Some(b) => match b.available() {
+                    Availability::Ready => b,
+                    Availability::Missing { reason } => {
+                        for pos in idxs {
+                            out[pos] = Some(Err(TtsError::BackendUnavailable {
+                                id: id.clone(),
+                                reason: reason.clone(),
+                            }));
+                        }
+                        continue;
+                    }
+                },
+                None => {
+                    for pos in idxs {
+                        out[pos] = Some(Err(TtsError::UnknownBackend(id.clone())));
+                    }
+                    continue;
+                }
+            };
+
+            let shard: Vec<RenderRequest> = idxs.iter().map(|&i| reqs[i].clone()).collect();
+            let rendered = backend.render_batch_partial(&shard).await;
+            if rendered.len() != shard.len() {
+                // A plugin breaking the one-outcome-per-request contract must not
+                // silently shift results onto the wrong segments.
+                for pos in idxs {
+                    out[pos] = Some(Err(TtsError::Worker(format!(
+                        "backend '{id}' returned {} outcomes for {} requests",
+                        rendered.len(),
+                        shard.len()
+                    ))));
+                }
+                continue;
+            }
+            for (&pos, res) in idxs.iter().zip(rendered) {
+                out[pos] = Some(res);
+            }
+        }
+
+        out.into_iter()
+            .enumerate()
+            .map(|(i, slot)| {
+                slot.unwrap_or_else(|| {
+                    Err(TtsError::Worker(format!("segment {i} produced no outcome")))
+                })
+            })
+            .collect()
+    }
 }

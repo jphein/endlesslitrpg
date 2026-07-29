@@ -417,6 +417,13 @@ where
             })
         })?;
 
+        // The canonical permanent artifact (§8). Written here rather than in the render
+        // stage because the text ships even when audio fails, and a failure to write it must
+        // not cost the chapter either — the prose is already durable in `chapters.text_md`.
+        if let Err(e) = self.artifacts.write_text(number, &text_md).await {
+            warn!(chapter = number, error = %e, "could not write the chapter markdown");
+        }
+
         // ---- 6 + 7. new_lore BEFORE deltas ---------------------------------
         let mut applied = 0usize;
         let mut rejected = 0usize;

@@ -325,3 +325,129 @@ async fn render_joined_defaults_to_concatenating_the_batch() {
     assert_eq!(joined.duration_ms(), 50);
     assert_eq!(joined.len(), 50 * 32);
 }
+
+// ------------------------------------------- per-segment failure isolation (§10)
+
+/// A backend that fails for one specific voice, standing in for Azure rejecting a
+/// voice name it does not recognise (HTTP 400).
+struct PickyMock;
+
+#[async_trait]
+impl TtsBackend for PickyMock {
+    fn id(&self) -> &str {
+        "picky"
+    }
+    fn available(&self) -> Availability {
+        Availability::Ready
+    }
+    fn voices(&self) -> Vec<VoiceDesc> {
+        vec![]
+    }
+    async fn render(&self, req: &RenderRequest) -> Result<Pcm16k, TtsError> {
+        if req.voice.remainder.contains("bogus") {
+            return Err(TtsError::HttpStatus {
+                status: 400,
+                body: "voice not found".into(),
+            });
+        }
+        Ok(Pcm16k::silence_ms(10))
+    }
+}
+
+#[tokio::test]
+async fn one_bad_voice_costs_one_segment_not_the_whole_chapter() {
+    // The live defect: a ten-segment chapter lost *all* audio because segment 7 used
+    // a voice Azure rejected. Spec §10 promises degradation, not total loss.
+    let reg = TtsRegistry::new().with(Box::new(PickyMock));
+    let reqs: Vec<RenderRequest> = (0..10)
+        .map(|i| {
+            let voice = if i == 7 { "picky:bogus" } else { "picky:good" };
+            req(i, voice, "text")
+        })
+        .collect();
+
+    let out = reg.render_all_partial(&reqs).await;
+    assert_eq!(out.len(), 10, "one outcome per request, always");
+    assert_eq!(out.iter().filter(|r| r.is_ok()).count(), 9);
+    assert!(out[7].is_err(), "segment 7 is the one that failed");
+    for (i, r) in out.iter().enumerate() {
+        if i != 7 {
+            assert_eq!(r.as_ref().unwrap().duration_ms(), 10, "segment {i}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn the_strict_batch_still_fails_fast_for_callers_that_want_that() {
+    let reg = TtsRegistry::new().with(Box::new(PickyMock));
+    let reqs = vec![req(0, "picky:good", "a"), req(1, "picky:bogus", "b")];
+    assert!(reg.render_all(&reqs).await.is_err());
+}
+
+#[tokio::test]
+async fn an_unknown_backend_only_costs_its_own_segments() {
+    let reg = TtsRegistry::new().with(Box::new(Mock::ready("sherpa", 10)));
+    let reqs = vec![
+        req(0, "sherpa:cori:0", "a"),
+        req(1, "nope:v", "b"),
+        req(2, "sherpa:cori:0", "c"),
+    ];
+    let out = reg.render_all_partial(&reqs).await;
+    assert!(out[0].is_ok());
+    assert!(matches!(out[1], Err(TtsError::UnknownBackend(_))));
+    assert!(
+        out[2].is_ok(),
+        "a later segment must survive an earlier failure"
+    );
+}
+
+#[tokio::test]
+async fn an_unavailable_backend_only_costs_its_own_segments() {
+    let reg = TtsRegistry::new()
+        .with(Box::new(Mock::ready("sherpa", 10)))
+        .with(Box::new(Mock::unavailable("azure", "no key")));
+    let reqs = vec![
+        req(0, "sherpa:cori:0", "a"),
+        req(1, "azure:en-GB-Ada:DragonHDLatestNeural", "b"),
+    ];
+    let out = reg.render_all_partial(&reqs).await;
+    assert!(out[0].is_ok());
+    assert!(matches!(out[1], Err(TtsError::BackendUnavailable { .. })));
+}
+
+#[tokio::test]
+async fn partial_results_stay_in_request_order_across_backends() {
+    let reg = TtsRegistry::new()
+        .with(Box::new(Mock::ready("sherpa", 10)))
+        .with(Box::new(PickyMock));
+    let reqs = vec![
+        req(0, "sherpa:cori:0", "a"),
+        req(1, "picky:bogus", "b"),
+        req(2, "sherpa:cori:0", "aa"),
+        req(3, "picky:good", "c"),
+    ];
+    let out = reg.render_all_partial(&reqs).await;
+    assert_eq!(out[0].as_ref().unwrap().duration_ms(), 10);
+    assert!(out[1].is_err());
+    assert_eq!(out[2].as_ref().unwrap().duration_ms(), 20);
+    assert_eq!(out[3].as_ref().unwrap().duration_ms(), 10);
+}
+
+#[tokio::test]
+async fn the_default_partial_impl_reports_every_segment() {
+    let mock = Mock::ready("sherpa", 5);
+    let reqs = vec![
+        req(0, "sherpa:cori:0", "ab"),
+        req(1, "sherpa:cori:0", "abc"),
+    ];
+    let out = mock.render_batch_partial(&reqs).await;
+    assert_eq!(out.len(), 2);
+    assert_eq!(out[0].as_ref().unwrap().duration_ms(), 10);
+    assert_eq!(out[1].as_ref().unwrap().duration_ms(), 15);
+}
+
+#[tokio::test]
+async fn partial_of_nothing_is_nothing() {
+    let reg = TtsRegistry::new().with(Box::new(PickyMock));
+    assert!(reg.render_all_partial(&[]).await.is_empty());
+}

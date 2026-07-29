@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use litrpg_cli::{cast, init, note, prompt, render, rewind, state, status};
+use litrpg_cli::{cast, init, note, play, prompt, read, render, rewind, state, status};
 use litrpg_config::Config;
 use litrpg_store::Store;
 
@@ -76,6 +76,24 @@ enum Command {
         /// Skip the interactive confirmation
         #[arg(long)]
         force: bool,
+    },
+
+    /// Print a chapter's prose (default: the latest)
+    Read {
+        /// Chapter number; omit for the latest
+        chapter: Option<u32>,
+        /// One line per segment: speaker, kind, voice and timing
+        #[arg(long)]
+        segments: bool,
+    },
+
+    /// Play a chapter's audio (default: the latest)
+    Play {
+        /// Chapter number; omit for the latest
+        chapter: Option<u32>,
+        /// Print the command instead of running it
+        #[arg(long)]
+        print_command: bool,
     },
 
     /// Re-render audio for a chapter (not implemented yet)
@@ -264,6 +282,35 @@ fn main() -> Result<()> {
 
             let rows = rewind::execute(&store, *chapter)?;
             print!("{}", rewind::render_done(*chapter, rows));
+        }
+
+        Command::Read { chapter, segments } => {
+            let store = open_store(&config)?;
+            let view = read::read(&store, *chapter)?;
+            if cli.json {
+                print_json(&view)?;
+            } else if *segments {
+                print!("{}", read::render_segments(&view));
+            } else {
+                print!("{}", read::render_prose(&view));
+            }
+        }
+
+        Command::Play {
+            chapter,
+            print_command,
+        } => {
+            let store = open_store(&config)?;
+            let path_env = std::env::var("PATH").ok();
+            let plan = play::plan(&store, *chapter, &play::players(), path_env.as_deref())?;
+            if cli.json {
+                print_json(&plan)?;
+            } else if *print_command {
+                println!("{}", plan.command_line());
+            } else {
+                print!("{}", play::render_plan(&plan));
+                play::spawn(&plan)?;
+            }
         }
 
         Command::Render { chapter } => {

@@ -173,10 +173,28 @@ pub trait TtsBackend: Send + Sync {
     /// See [`TtsBackend::render_joined`] for the single-request multi-voice path.
     async fn render_batch(&self, reqs: &[RenderRequest]) -> Result<Vec<Pcm16k>, TtsError> {
         let mut out = Vec::with_capacity(reqs.len());
-        for r in reqs {
-            out.push(self.render(r).await?);
+        for r in self.render_batch_partial(reqs).await {
+            out.push(r?);
         }
         Ok(out)
+    }
+
+    /// Render many segments, returning **one outcome per request** so a single
+    /// failure does not discard the rest.
+    ///
+    /// This is the primitive; [`TtsBackend::render_batch`] is the strict view of it
+    /// (first error wins). Spec §10 promises a TTS failure *degrades* — text ships,
+    /// `has_audio = false`, retry later — but the all-or-nothing version made one bad
+    /// voice out of ten cost all ten segments' audio, which is not degrading. A
+    /// caller that can use nine good segments should be able to get them.
+    ///
+    /// Contract: exactly `reqs.len()` outcomes, in request order.
+    async fn render_batch_partial(&self, reqs: &[RenderRequest]) -> Vec<Result<Pcm16k, TtsError>> {
+        let mut out = Vec::with_capacity(reqs.len());
+        for r in reqs {
+            out.push(self.render(r).await);
+        }
+        out
     }
 
     /// Render many segments into **one continuous stream**, discarding per-segment

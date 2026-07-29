@@ -93,6 +93,31 @@ fn default_narrator_voice() -> String {
     "sherpa:piper-en_GB-cori-high:0".into()
 }
 
+/// The RPG-terminal voice for `[SYSTEM]` stat blocks. A neutral speaker; the robotic
+/// character comes from a post-render filter chain, not from the model (spec §7.4).
+fn default_system_voice() -> String {
+    "sherpa:kokoro-multi-lang-v1_0:11".into()
+}
+
+/// The pool characters are drawn from, on first appearance, and kept.
+///
+/// Breadth matters more than it looks: once the pool is exhausted the assigner wraps
+/// and two characters share a voice — a defect only ever discovered by *listening*, by
+/// which point the cast table has made it permanent. These are Kokoro's labelled
+/// English speakers, interleaved by gender and accent so a growing cast stays distinct
+/// rather than exhausting one group first: Am-male, Am-female, Br-male, Br-female.
+fn default_character_voices() -> Vec<String> {
+    [18, 3, 26, 21, 11, 9, 27, 20, 13, 0, 24, 22, 16, 7, 25, 23]
+        .iter()
+        .map(|sid| format!("sherpa:kokoro-multi-lang-v1_0:{sid}"))
+        .collect()
+}
+
+/// Seconds to wait before re-checking the buffer when there is nothing to do.
+fn default_poll_interval_secs() -> u64 {
+    45
+}
+
 /// Every field carries a `serde` default, so a partial config file is valid and
 /// missing keys fall back rather than failing the load.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,6 +142,12 @@ pub struct Config {
     pub target_words: u32,
     #[serde(default = "default_narrator_voice")]
     pub narrator_voice: String,
+    #[serde(default = "default_system_voice")]
+    pub system_voice: String,
+    #[serde(default = "default_character_voices")]
+    pub character_voices: Vec<String>,
+    #[serde(default = "default_poll_interval_secs")]
+    pub poll_interval_secs: u64,
 }
 
 impl Default for Config {
@@ -131,6 +162,9 @@ impl Default for Config {
             buffer_target: default_buffer_target(),
             target_words: default_target_words(),
             narrator_voice: default_narrator_voice(),
+            system_voice: default_system_voice(),
+            character_voices: default_character_voices(),
+            poll_interval_secs: default_poll_interval_secs(),
         }
     }
 }

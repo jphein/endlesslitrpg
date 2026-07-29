@@ -207,6 +207,15 @@ impl VoiceAssigner {
             return free.clone();
         }
 
+        // An empty pool is reachable in real configuration — a deployment whose only
+        // registered backend advertises a single voice, or one where every configured
+        // character voice belongs to a backend that is not loaded. `% self.pool.len()`
+        // would be a divide-by-zero panic, which is a spectacularly bad way to lose a
+        // chapter that was already written.
+        if self.pool.is_empty() {
+            return self.narrator_voice.clone();
+        }
+
         let drawn = taken.iter().filter(|v| self.pool.contains(v)).count();
         self.pool[drawn % self.pool.len()].clone()
     }

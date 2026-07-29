@@ -44,6 +44,7 @@ pub mod library;
 pub mod ports;
 pub mod publish;
 pub mod render;
+pub mod voices;
 
 pub use adapters::{EmberGenerator, RegistryRenderer};
 pub use cast::{
@@ -59,3 +60,4 @@ pub use library::StoreLibrary;
 pub use ports::{Artifacts, Generator, Library, Renderer, StoryMeta};
 pub use publish::FsArtifacts;
 pub use render::{PlannedSegment, RenderedChapter, assemble, chapter_markdown, word_count};
+pub use voices::{VoicePlan, plan_voices};

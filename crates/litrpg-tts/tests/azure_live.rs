@@ -184,3 +184,94 @@ async fn one_multi_voice_document_returns_one_joined_stream() {
         peak(&joined)
     );
 }
+
+// ------------------------------------------------ curated-list verification
+
+/// **One catalog request, validates every advertised voice.**
+///
+/// This is the check that should have existed before
+/// `en-GB-OllieMultilingual:DragonHDLatestNeural` shipped. It costs a single
+/// non-synthesis request and is authoritative rather than curated, so it scales to
+/// the whole table for free — unlike probing each voice with a render.
+#[tokio::test]
+#[ignore = "one Azure catalog request (no synthesis)"]
+async fn every_curated_voice_exists_in_the_azure_catalog() {
+    let b = backend();
+    let catalog = b.fetch_catalog().await.unwrap();
+    assert!(
+        catalog.len() > 100,
+        "catalog looks truncated: {} entries",
+        catalog.len()
+    );
+    eprintln!(
+        "azure catalog: {} voices in {}, {} DragonHD",
+        catalog.len(),
+        b.config().region,
+        catalog.iter().filter(|v| v.contains("DragonHD")).count()
+    );
+
+    let mut bad = Vec::new();
+    for v in b.voices() {
+        let verdict = b.preflight_one(&v.voice_ref, &catalog);
+        eprintln!(
+            "  {} {}",
+            if verdict.is_ok() { "OK  " } else { "FAIL" },
+            verdict
+        );
+        if !verdict.is_ok() {
+            bad.push(verdict.to_string());
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "advertised voices that Azure does not list — these return HTTP 400 and would \
+         cost a chapter's audio:\n  {}",
+        bad.join("\n  ")
+    );
+
+    // The configured `speech-to-cli` default is assignable here too, so it must also
+    // be real.
+    let configured = format!("azure:{}", b.config().default_voice);
+    let verdict = b.preflight_one(&configured, &catalog);
+    assert!(
+        verdict.is_ok(),
+        "configured default voice is not real: {verdict}"
+    );
+}
+
+/// Per-voice synthesis, one short word each. Belt and braces over the catalog check:
+/// catalog presence is necessary but not sufficient — a voice could be listed and
+/// still refuse a request shape.
+#[tokio::test]
+#[ignore = "spends Azure quota: one short render per advertised voice"]
+async fn every_curated_voice_actually_synthesizes() {
+    let b = backend();
+    let mut failures = Vec::new();
+    for v in b.voices() {
+        let r = req(0, &v.voice_ref, "Ready.", SpeakerKind::Character);
+        match b.render(&r).await {
+            Ok(pcm) => {
+                let ok = !pcm.is_empty() && pcm.is_whole_ms() && peak(&pcm) > 500;
+                eprintln!(
+                    "  {} {:<46} {:>6} B  peak {}",
+                    if ok { "OK  " } else { "WEAK" },
+                    v.voice_ref,
+                    pcm.len(),
+                    peak(&pcm)
+                );
+                if !ok {
+                    failures.push(format!("{}: empty or silent output", v.voice_ref));
+                }
+            }
+            Err(e) => {
+                eprintln!("  FAIL {:<46} {e}", v.voice_ref);
+                failures.push(format!("{}: {e}", v.voice_ref));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "advertised voices that do not synthesize:\n  {}",
+        failures.join("\n  ")
+    );
+}

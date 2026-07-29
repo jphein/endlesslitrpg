@@ -6,22 +6,29 @@ license.workspace = true
 rust-version.workspace = true
 description = "The chapter loop: schedule, generate, validate, render, publish"
 
+[[bin]]
+name = "litrpg-engine"
+path = "src/main.rs"
+
+[features]
+default = []
+# Forwards to litrpg-tts so a build can include local TTS. Off by default: a plain
+# `cargo test` must not build sherpa-onnx native libraries.
+sherpa = ["litrpg-tts/sherpa"]
+
 [dependencies]
 litrpg-core = { workspace = true }
 litrpg-store = { workspace = true }
 litrpg-ember = { workspace = true }
 litrpg-tts = { workspace = true }
 litrpg-config = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["signal"] }
 thiserror = { workspace = true }
 serde = { workspace = true, features = ["std"] }
 serde_json = { workspace = true, features = ["std"] }
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 tempfile = { workspace = true }
-# The cycle degrades rather than failing (spec §10), so a render failure is a `warn!` and
-# nothing else. Without a subscriber a live test reports `has_audio: false` and takes the
-# reason with it — which is the silent-failure mode this whole design exists to avoid.
-tracing-subscriber = { workspace = true }

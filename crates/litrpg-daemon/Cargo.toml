@@ -23,3 +23,15 @@ tower-http = { workspace = true, features = ["fs", "trace"] }
 serde = { workspace = true, features = ["std"] }
 serde_json = { workspace = true, features = ["std"] }
 thiserror = { workspace = true }
+# `ReaderStream` — the adapter that turns a seeked `tokio::fs::File` into an
+# `axum::body::Body` without buffering. Not in `workspace.dependencies`, and adding
+# it there would mean editing the workspace root, which this crate is not permitted
+# to touch; pinned explicitly here instead. Already in `Cargo.lock` at 0.7.19 via
+# tower-http's `fs` feature, so this adds no new transitive weight.
+tokio-util = { version = "0.7.19", features = ["io"] }
+
+[dev-dependencies]
+# `ServiceExt::oneshot` — drives the router in-process, no socket bound.
+tower = { version = "0.5.3", features = ["util"] }
+tempfile = "3.27.0"
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs", "io-util", "sync"] }

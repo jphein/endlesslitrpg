@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use thiserror::Error;
 
 pub mod cast;
+pub mod engine;
 pub mod init;
 pub mod listened;
 pub mod naming;
@@ -21,6 +22,7 @@ pub mod render;
 pub mod rewind;
 pub mod state;
 pub mod status;
+pub mod story;
 
 #[derive(Debug, Error)]
 pub enum CliError {
@@ -59,6 +61,15 @@ pub enum CliError {
         status: String,
         path: PathBuf,
     },
+
+    #[error("--{field} cannot be blank: {why}")]
+    BlankStoryField {
+        field: &'static str,
+        why: &'static str,
+    },
+
+    #[error("{got:?} is not a chapter selection ({why}). Use `3`, `3 5 7` or `3..7`.")]
+    BadRange { got: String, why: String },
 
     #[error("no chapters yet — the engine has not written one")]
     NoChapters,

@@ -96,6 +96,13 @@ pub struct ChapterView {
     pub state_dirty: bool,
     pub words: usize,
     pub segments: Vec<SegmentView>,
+    /// Segment voices that disagree with their speaker's cast row.
+    ///
+    /// This is the view someone opens to check a suspected mis-cast, so the comparison is
+    /// made here rather than left to the eye: the cast row is the intent and the segment
+    /// row is what actually plays. Since #15 a re-render re-derives voices from the cast,
+    /// so this gap is both the symptom and what `litrpg render` will close.
+    pub voice_divergence: Vec<crate::cast::VoiceDivergence>,
 }
 
 pub fn read(store: &Store, wanted: Option<u32>) -> Result<ChapterView> {
@@ -112,6 +119,7 @@ pub fn read(store: &Store, wanted: Option<u32>) -> Result<ChapterView> {
         has_audio: row.has_audio,
         state_dirty: row.state_dirty,
         segments: segments.iter().map(SegmentView::from).collect(),
+        voice_divergence: crate::cast::voice_divergence(store, number)?,
     })
 }
 
@@ -189,6 +197,20 @@ pub fn render_segments(c: &ChapterView) -> String {
             format!("{}-{}", s.start_ms, s.end_ms),
             s.text
         ));
+    }
+
+    if !c.voice_divergence.is_empty() {
+        out.push_str(
+            "\n!! Recorded voices disagree with the cast. The cast row is the intent; the\n\
+             !! recorded one is what currently plays. `litrpg render` on this chapter will\n\
+             !! re-derive from the cast and change it to:\n",
+        );
+        for d in &c.voice_divergence {
+            out.push_str(&format!(
+                "!!   {}: {} -> {}\n",
+                d.speaker, d.recorded, d.cast_says
+            ));
+        }
     }
 
     // Defensive: `Store::attach_audio` rejects a non-contiguous manifest, so this

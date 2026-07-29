@@ -146,6 +146,10 @@ pub struct PlayPlan {
     pub path: PathBuf,
     /// Full argv including the file path as the final element.
     pub argv: Vec<String>,
+    /// `has_audio` is clear but the media is still on disk — the chapter is awaiting a
+    /// re-render (`litrpg render`) and the existing audio remains playable until the
+    /// engine overwrites it.
+    pub queued_for_rerender: bool,
 }
 
 impl PlayPlan {
@@ -179,12 +183,17 @@ pub fn plan(
     let number = resolve_number(store, wanted)?;
     let row = store.chapter(number)?;
 
-    if !row.has_audio {
-        return Err(CliError::ChapterHasNoAudio { chapter: number });
-    }
-
     let derived_mp3 = media_path(media_dir, number, "mp3");
     let derived_pcm = media_path(media_dir, number, "pcm");
+
+    // `has_audio` clear with media still present means the chapter is queued for a
+    // re-render, not that it was never rendered. Refusing here would have been a lie
+    // once `litrpg render` existed: the file is right there and plays fine until the
+    // engine replaces it.
+    let queued_for_rerender = !row.has_audio && (derived_mp3.is_file() || derived_pcm.is_file());
+    if !row.has_audio && !queued_for_rerender {
+        return Err(CliError::ChapterHasNoAudio { chapter: number });
+    }
 
     // `has_audio` is a database flag; the files live on a filesystem that can be
     // pruned or unmounted underneath it. Stat rather than trust, and distinguish
@@ -224,6 +233,7 @@ pub fn plan(
             source: p.source,
             path: path.clone(),
             argv,
+            queued_for_rerender,
         });
     }
 
@@ -269,6 +279,11 @@ fn ms(total: u32) -> String {
 }
 
 pub fn render_plan(p: &PlayPlan) -> String {
+    let note = if p.queued_for_rerender {
+        "  queued for re-render — this is the audio about to be replaced\n"
+    } else {
+        ""
+    };
     format!(
         "Chapter {} — {}\n  {} · {}\n  {}\n",
         p.chapter,
@@ -279,5 +294,5 @@ pub fn render_plan(p: &PlayPlan) -> String {
             Source::RawPcm => "raw pcm",
         },
         p.path.display()
-    )
+    ) + note
 }

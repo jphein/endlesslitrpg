@@ -6,7 +6,9 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use litrpg_cli::{cast, init, listened, note, play, prompt, read, render, rewind, state, status};
+use litrpg_cli::{
+    cast, engine, init, listened, note, play, prompt, read, render, rewind, state, status, story,
+};
 use litrpg_config::Config;
 use litrpg_store::Store;
 
@@ -63,6 +65,16 @@ enum Command {
         action: Option<CastAction>,
     },
 
+    /// Show or change story metadata (title, protagonist)
+    Story {
+        /// Set the protagonist — the name the prompt calls the character
+        #[arg(long, value_name = "NAME")]
+        protagonist: Option<String>,
+        /// Set the story title
+        #[arg(long, value_name = "TITLE")]
+        title: Option<String>,
+    },
+
     /// Print the folded ledger snapshot
     State {
         /// Limit to one subject, showing equipment and appearance
@@ -102,10 +114,17 @@ enum Command {
         print_command: bool,
     },
 
-    /// Re-render audio for a chapter (not implemented yet)
+    /// Regenerate a chapter's audio from its recorded text, re-voiced from the cast
+    ///
+    /// Takes `3`, `3 5 7` or `3..7`. Fixes a failed render, a corrupt file, a stale coarse
+    /// manifest, and a wrong voice — including one a substitution made permanent. Reports
+    /// which segments will change voice before queueing them.
     Render {
-        /// Chapter number
-        chapter: u32,
+        /// Chapter numbers or an inclusive range. Omit with --all.
+        chapters: Vec<String>,
+        /// Queue every chapter that currently has audio
+        #[arg(long)]
+        all: bool,
     },
 }
 
@@ -255,6 +274,23 @@ fn main() -> Result<()> {
             }
         }
 
+        Command::Story { protagonist, title } => {
+            let store = open_store(&config)?;
+            let report = story::story(
+                &store,
+                &story::StoryEdit {
+                    protagonist: protagonist.clone(),
+                    title: title.clone(),
+                },
+                &config.story_dir,
+            )?;
+            if cli.json {
+                print_json(&report)?;
+            } else {
+                print!("{}", story::render_text(&report));
+            }
+        }
+
         Command::State { subject } => {
             let store = open_store(&config)?;
             let report = state::state(&store, subject.as_deref())?;
@@ -338,13 +374,31 @@ fn main() -> Result<()> {
             }
         }
 
-        Command::Render { chapter } => {
+        Command::Render { chapters, all } => {
             let store = open_store(&config)?;
-            let stub = render::render(&store, *chapter)?;
-            if cli.json {
-                print_json(&stub)?;
+            let selection = if *all {
+                render::Selection::All
+            } else if chapters.is_empty() {
+                anyhow::bail!("name at least one chapter, or pass --all");
             } else {
-                print!("{}", render::render_text(&stub));
+                render::Selection::parse(chapters)?
+            };
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            let status = engine::engine_status(&store, config.poll_interval_secs, now_ms)?;
+            let report = render::render(
+                &store,
+                &selection,
+                &config.media_dir,
+                config.poll_interval_secs,
+                status,
+            )?;
+            if cli.json {
+                print_json(&report)?;
+            } else {
+                print!("{}", render::render_text(&report));
             }
         }
     }

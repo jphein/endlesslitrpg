@@ -102,6 +102,68 @@ impl CastListing {
     }
 }
 
+/// A recorded segment voice that disagrees with the speaker's cast row.
+///
+/// The cast row is the story's intent; the segment row is what was actually rendered. They
+/// diverge when a render substituted an unrenderable voice, or when the cast has been
+/// changed since.
+///
+/// Since #15, `Engine::replan_from_store` keeps only `idx`/`speaker`/`kind`/`text` from the
+/// stored rows and **re-derives `voice_ref` from the cast**, so a re-render *corrects* a
+/// divergence rather than reproducing it. That makes this the set of segments a re-render
+/// will **change** — which is worth telling a listener before four segments' worth of
+/// narration changes voice under them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct VoiceDivergence {
+    pub speaker: String,
+    /// What the segment rows record — what a re-render would reproduce.
+    pub recorded: String,
+    /// What the cast row asks for.
+    pub cast_says: String,
+}
+
+/// Segment voices in `chapter` that disagree with their speaker's cast row.
+///
+/// Speakers absent from the cast are skipped for two reasons: there is nothing to disagree
+/// with, so claiming a divergence would invent an intent nobody recorded — and it is
+/// precisely the case `replan_from_store` leaves alone, warning and keeping the stored
+/// voice. So what this reports is exactly the set a re-render will change.
+///
+/// Speaker matching is **case-insensitive, to match the engine**. `replan_from_store` uses
+/// `eq_ignore_ascii_case`, so an exact-match lookup here would silently omit a segment
+/// spelled `SYSTEM` against a cast row spelled `system` — reporting "nothing will change"
+/// about a segment that will. Two places comparing the same names by different rules is the
+/// duplication that keeps biting; this one is now aligned deliberately.
+pub fn voice_divergence(store: &Store, chapter: u32) -> Result<Vec<VoiceDivergence>> {
+    let cast: BTreeMap<String, String> = store
+        .cast()?
+        .into_iter()
+        .map(|c| (c.speaker.to_lowercase(), c.voice_ref))
+        .collect();
+
+    let mut out: Vec<VoiceDivergence> = Vec::new();
+    for seg in store.segments(chapter)? {
+        let Some(want) = cast.get(&seg.speaker.to_lowercase()) else {
+            continue;
+        };
+        if *want == seg.voice_ref {
+            continue;
+        }
+        // One entry per speaker, not per segment: a 83-segment chapter with one
+        // mis-voiced narrator should report once.
+        if out.iter().any(|d| d.speaker == seg.speaker) {
+            continue;
+        }
+        out.push(VoiceDivergence {
+            speaker: seg.speaker,
+            recorded: seg.voice_ref,
+            cast_says: want.clone(),
+        });
+    }
+    out.sort_by(|a, b| a.speaker.cmp(&b.speaker));
+    Ok(out)
+}
+
 /// The voice each speaker was last rendered with, newest rendered chapter winning.
 fn last_rendered_voices(
     store: &Store,

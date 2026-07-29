@@ -1,4 +1,4 @@
-use litrpg_cli::{CliError, cast, note, render, rewind, state, status};
+use litrpg_cli::{CliError, cast, note, rewind, state, status};
 use litrpg_core::hash::content_hash;
 use litrpg_core::ledger::Op;
 use litrpg_core::manifest::{Manifest, Segment, SpeakerKind};
@@ -1127,39 +1127,10 @@ fn force_confirms_without_consuming_input() {
     assert_eq!(cursor.position(), 0, "force must not read stdin");
 }
 
-// ------------------------------------------------------------------- render
-
-#[test]
-fn render_is_a_stub_that_names_the_blocking_crate() {
-    let s = store();
-    add_chapter(&s, 1);
-    let stub = render::render(&s, 1).unwrap();
-    assert!(!stub.implemented);
-    assert!(stub.chapter_exists);
-    assert!(!stub.has_audio);
-    assert_eq!(stub.blocked_on, "litrpg-tts");
-
-    let out = render::render_text(&stub);
-    assert!(out.contains("litrpg-tts"), "{out}");
-    assert!(out.contains("not implemented"), "{out}");
-}
-
-#[test]
-fn render_reports_a_missing_chapter_rather_than_pretending() {
-    let stub = render::render(&store(), 400).unwrap();
-    assert!(!stub.chapter_exists);
-    assert!(render::render_text(&stub).contains("does not exist"));
-}
-
-#[test]
-fn render_notes_when_a_chapter_already_has_audio() {
-    let s = store();
-    add_chapter(&s, 1);
-    give_audio(&s, 1);
-    let stub = render::render(&s, 1).unwrap();
-    assert!(stub.has_audio);
-    assert!(render::render_text(&stub).contains("replace"));
-}
+// NOTE: the `render` stub tests that lived here are gone — `render` is no longer a
+// stub, and its behaviour is covered in tests/render.rs. Removed rather than adapted:
+// they asserted "prints that it is not implemented", which is the opposite of the
+// current contract.
 
 // --------------------------------------------------------------------- json
 

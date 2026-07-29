@@ -1,9 +1,10 @@
 use litrpg_store::Store;
+use litrpg_store::migrations::TARGET_VERSION;
 
 #[test]
 fn opens_in_memory_and_applies_migrations() {
     let store = Store::open_in_memory().unwrap();
-    assert_eq!(store.schema_version().unwrap(), 1);
+    assert_eq!(store.schema_version().unwrap(), TARGET_VERSION);
 }
 
 #[test]
@@ -31,5 +32,5 @@ fn migrations_are_idempotent() {
     let store = Store::open_in_memory().unwrap();
     store.migrate().unwrap();
     store.migrate().unwrap();
-    assert_eq!(store.schema_version().unwrap(), 1);
+    assert_eq!(store.schema_version().unwrap(), TARGET_VERSION);
 }

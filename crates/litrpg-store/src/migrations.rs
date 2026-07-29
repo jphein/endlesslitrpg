@@ -1,6 +1,12 @@
 //! Schema DDL, versioned through SQLite's `user_version` pragma.
 
 /// Index N holds the migration that moves the schema from version N to N+1.
-pub const MIGRATIONS: &[&str] = &[include_str!("schema/001_initial.sql")];
+///
+/// Append only. Editing a shipped migration would leave existing databases in a
+/// state no version number describes.
+pub const MIGRATIONS: &[&str] = &[
+    include_str!("schema/001_initial.sql"),
+    include_str!("schema/002_summary_uniqueness.sql"),
+];
 
 pub const TARGET_VERSION: i64 = MIGRATIONS.len() as i64;

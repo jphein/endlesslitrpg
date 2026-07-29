@@ -2,11 +2,13 @@
 
 pub mod chapters;
 pub mod ledger;
+pub mod library;
 pub mod migrations;
 pub mod story;
 
 pub use chapters::{ChapterRow, NewChapter};
 pub use ledger::{CastRow, NoteRow, REWOUND_REASON};
+pub use library::{LEVEL_CHAPTER, LoreRow, SummaryRow};
 pub use story::{NewStory, StoryRow};
 
 use std::time::{SystemTime, UNIX_EPOCH};

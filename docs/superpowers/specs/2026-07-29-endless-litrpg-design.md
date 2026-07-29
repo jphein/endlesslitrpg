@@ -315,6 +315,54 @@ broken, reproduced the substitution. **A test of a recovery path must start from
 Exercising it from a healthy fixture passes trivially and proves nothing — and it will keep passing
 while the recovery recovers nothing.
 
+One more, learned by writing the same sentence wrong twice in an afternoon: **assert the claim
+positively, not only negatively.** A negative assertion pins the mistake that has already been made
+and nothing else. `!out.contains("restoring the original")` was added the first time that phrase was
+wrong, and it sat there untroubled while the text was inverted past correct in the other direction.
+The positive form — `contains("re-derives voices from the cast")`, and better, the arrow
+`azure:… -> sherpa:…`, which pins the *direction* — fails on a rewrite that drops or reverses the
+claim. Negatives are a supplement; they cannot be the guard.
+
+### 5.6 A claim about someone else's behaviour has no owner
+
+The defects in §5.5 were not false when written. Every one was accurate, and then a *different
+component* changed and nothing failed.
+
+> A doc comment describing another module's behaviour is a copy of that behaviour with nothing
+> forcing it to track. Only a test that exercises both sides can fail when they diverge.
+
+This is §5.4 one step out: not two copies of a **value** but a copy of a **behaviour**. It is worse
+in one respect, because a duplicated value can at least be grepped, while a paraphrase of what
+another crate does is invisible to every tool. Three specimens, all found on the same day:
+
+- `render`'s help described the resume path's voice handling. The resume path changed; the help
+  became a confident lie in both directions in turn.
+- Three comments cited `cycle.rs:896` — a line number is another copy of a location, and they were
+  stale the moment the function they described was edited. Replaced with the function's *name*,
+  which survives an edit.
+- A divergence check compared speaker names by exact equality while the engine compared them with
+  `eq_ignore_ascii_case`. `SYSTEM` against a cast row spelled `system` would have reported "nothing
+  will change" and then changed anyway. Two places comparing the same names by different rules,
+  found by reading the other side — not by any test on either side.
+
+The mitigation that works is to **assert across the boundary rather than describe it**: one fixture
+exercising both rules, so it fails if they diverge again.
+
+### 5.7 Resolving a contradiction between agents or sessions
+
+Twice in one afternoon a measurement contradicted a claim, and on both occasions the answer was that
+the two parties were reading different snapshots — once of the engine's source, once of the CLI's
+own output. Neither party was wrong.
+
+> A contradiction that **neither side can explain** is a version mismatch, not a disagreement.
+>
+> So: quote the artifact with its identity attached — a commit hash, or literal current output —
+> rather than re-asserting the conclusion.
+
+Re-asserting escalates and settles nothing, because both sides have honest evidence. Quoting the
+artifact resolves it in one exchange. The rule has to be applied symmetrically to work: the second
+occurrence ran in the opposite direction from the first, and the tell was identical.
+
 ---
 
 ## 6. Data model

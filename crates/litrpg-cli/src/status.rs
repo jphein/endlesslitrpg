@@ -5,7 +5,7 @@
 //! state format is slipping. It is reported as a rate with its top codes, not
 //! buried under the chapter counts.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use litrpg_core::hash::content_hash;
 use litrpg_store::Store;
@@ -23,6 +23,69 @@ pub struct RejectionCount {
     pub count: i64,
 }
 
+/// Buffer depth measured from the playback cursor.
+///
+/// Before the cursor existed this was a proxy — the contiguous rendered run counting
+/// back from the latest chapter — because nothing recorded what had been consumed.
+/// With `story.consumed_through` there is a real baseline, so the numbers are now
+/// measured from it and the baseline is reported alongside them.
+///
+/// Two numbers, not one, because they answer different questions and their
+/// disagreement is itself a signal: `chapters_ahead` is what a buffer-fill decision
+/// counts, while `playable_ahead` is what a listener gets before hitting an unrendered
+/// gap. If chapters 6 and 8 are rendered but 7 is not, "2 ahead" overstates the
+/// listening experience by exactly the gap.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BufferView {
+    pub consumed_through: u32,
+    pub chapters_ahead: usize,
+    pub playable_ahead: usize,
+    pub buffer_target: u32,
+    pub buffer_ok: bool,
+}
+
+impl BufferView {
+    /// True when rendered-but-unreachable chapters exist past a gap.
+    pub fn has_gap(&self) -> bool {
+        self.chapters_ahead > self.playable_ahead
+    }
+
+    pub fn shortfall(&self) -> u32 {
+        (self.buffer_target as usize)
+            .saturating_sub(self.playable_ahead)
+            .try_into()
+            .unwrap_or(u32::MAX)
+    }
+}
+
+pub fn buffer_view(store: &Store, buffer_target: u32) -> Result<BufferView> {
+    let consumed_through = store.consumed_through()?;
+    let rows = store.chapters_since(consumed_through)?;
+
+    let chapters_ahead = rows.iter().filter(|c| c.has_audio).count();
+
+    // `chapters_since` is ordered ascending, so the playable run is the prefix whose
+    // numbers are consecutive from the cursor and which all have audio.
+    let mut playable_ahead = 0usize;
+    let mut expected = consumed_through.saturating_add(1);
+    for c in &rows {
+        if c.number == expected && c.has_audio {
+            playable_ahead += 1;
+            expected = expected.saturating_add(1);
+        } else {
+            break;
+        }
+    }
+
+    Ok(BufferView {
+        consumed_through,
+        chapters_ahead,
+        playable_ahead,
+        buffer_target,
+        buffer_ok: playable_ahead >= buffer_target as usize,
+    })
+}
+
 /// Whether the prompt on disk matches the one the engine is actually using.
 ///
 /// `story.prompt_hash` is the prompt **currently in effect**: §9.3 reloads only at
@@ -31,9 +94,14 @@ pub struct RejectionCount {
 /// operator "your edit is real but has not been picked up yet", which nothing else
 /// surfaces.
 ///
-/// The file hashed is the one `story.prompt_path` names, not `config.prompt_path()`.
-/// The row records where the in-effect prompt came from, so if the config's
-/// `story_dir` has since moved, the row's view is the honest comparison.
+/// Migration 004 made `story.prompt_path` **relative to `story_dir`**, so it is
+/// resolved with `litrpg_config::resolve_path` — the same rule the config uses for its
+/// own paths: expand `~`, then join against `story_dir` only if still relative.
+///
+/// Reusing that rule rather than a bare `join` buys two things. A row still holding an
+/// absolute path from before 004 keeps working, so the migration cannot strand a
+/// database. And if an operator ever does point the prompt somewhere else, an absolute
+/// value is honoured instead of being mangled into `<story_dir>/home/jp/...`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "state")]
 pub enum PromptSync {
@@ -58,11 +126,11 @@ impl PromptSync {
 }
 
 /// Compare the in-effect prompt hash against the file the story row names.
-pub fn prompt_sync(store: &Store) -> Result<PromptSync> {
+pub fn prompt_sync(store: &Store, story_dir: &Path) -> Result<PromptSync> {
     let Some(row) = store.story()? else {
         return Ok(PromptSync::NotInitialised);
     };
-    let path = PathBuf::from(&row.prompt_path);
+    let path = litrpg_config::resolve_path(Path::new(&row.prompt_path), story_dir);
     match std::fs::read_to_string(&path) {
         Ok(body) => {
             let on_disk = content_hash(&body);
@@ -91,12 +159,14 @@ pub struct StatusReport {
     pub latest_chapter: u32,
     pub total_chapters: usize,
     pub chapters_with_audio: usize,
-    /// Contiguous run of rendered chapters counting back from the latest — the
-    /// closest thing to "how much is ready to play next".
-    ///
-    /// This is **not** true buffer depth. The schema has no playback cursor, so
-    /// nothing records what has been consumed; a real depth needs that cursor.
-    pub rendered_tail: usize,
+    /// How far the listener has got. The explicit baseline every "ahead" number
+    /// below is measured from.
+    pub consumed_through: u32,
+    /// Rendered chapters after the cursor, gaps included.
+    pub chapters_ahead: usize,
+    /// Contiguous rendered run starting at `consumed_through + 1` — what can
+    /// actually be played before stalling. `buffer_ok` is measured on this.
+    pub playable_ahead: usize,
     pub buffer_target: u32,
     pub buffer_ok: bool,
     /// Chapters whose pass 2 failed, so deltas were never extracted (§6.0).
@@ -127,13 +197,11 @@ impl StatusReport {
     }
 }
 
-pub fn status(store: &Store, buffer_target: u32) -> Result<StatusReport> {
+pub fn status(store: &Store, buffer_target: u32, story_dir: &Path) -> Result<StatusReport> {
     let chapters = store.chapters_since(0)?;
     let latest_chapter = store.latest_number()?;
     let chapters_with_audio = chapters.iter().filter(|c| c.has_audio).count();
-
-    // `chapters_since` orders ascending, so the tail is the trailing run.
-    let rendered_tail = chapters.iter().rev().take_while(|c| c.has_audio).count();
+    let buffer = buffer_view(store, buffer_target)?;
 
     let applied_deltas = store.applied_count()?;
     let rejected_deltas = store.rejected_count()?;
@@ -150,7 +218,7 @@ pub fn status(store: &Store, buffer_target: u32) -> Result<StatusReport> {
         .map(|(code, count)| RejectionCount { code, count })
         .collect();
 
-    let prompt = prompt_sync(store)?;
+    let prompt = prompt_sync(store, story_dir)?;
 
     Ok(StatusReport {
         prompt_edit_pending: prompt.edit_pending(),
@@ -158,9 +226,11 @@ pub fn status(store: &Store, buffer_target: u32) -> Result<StatusReport> {
         latest_chapter,
         total_chapters: chapters.len(),
         chapters_with_audio,
-        rendered_tail,
+        consumed_through: buffer.consumed_through,
+        chapters_ahead: buffer.chapters_ahead,
+        playable_ahead: buffer.playable_ahead,
         buffer_target,
-        buffer_ok: rendered_tail >= buffer_target as usize,
+        buffer_ok: buffer.buffer_ok,
         dirty_chapters: store.dirty_chapters()?,
         applied_deltas,
         rejected_deltas,
@@ -228,11 +298,28 @@ pub fn render_text(r: &StatusReport) -> String {
         r.chapters_with_audio, r.total_chapters
     ));
 
+    out.push_str(&format!(
+        "  listened through  {}\n",
+        if r.consumed_through == 0 {
+            "nothing yet".to_string()
+        } else {
+            r.consumed_through.to_string()
+        }
+    ));
     let flag = if r.buffer_ok { "ok" } else { "BELOW TARGET" };
     out.push_str(&format!(
-        "  rendered ahead    {} (target {}) — {flag}\n",
-        r.rendered_tail, r.buffer_target
+        "  playable ahead    {} of {} (from chapter {}) — {flag}\n",
+        r.playable_ahead,
+        r.buffer_target,
+        r.consumed_through + 1
     ));
+    if r.chapters_ahead > r.playable_ahead {
+        out.push_str(&format!(
+            "  !! {} more chapter(s) are rendered but sit past an unrendered gap,\n\
+             \x20    so they cannot be reached by playing straight through.\n",
+            r.chapters_ahead - r.playable_ahead
+        ));
+    }
 
     if !r.dirty_chapters.is_empty() {
         let list = r

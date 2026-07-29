@@ -132,11 +132,9 @@ fn the_story_row_is_created_so_the_watch_has_a_subject() {
     assert_eq!(row.protagonist, "Kaelen");
     assert_eq!(row.target_words, 1500);
     assert_eq!(row.prompt_hash, r.prompt_hash);
-    assert!(
-        row.prompt_path.ends_with("prompt.md"),
-        "got {:?}",
-        row.prompt_path
-    );
+    // Relative to story_dir, not absolute — migration 004's convention, and what
+    // keeps the folder portable.
+    assert_eq!(row.prompt_path, "prompt.md");
 }
 
 #[test]
@@ -634,4 +632,120 @@ fn the_report_serializes_to_json() {
     assert!(json.contains("\"story\":\"created\""), "{json}");
     assert!(json.contains("prompt_is_placeholder"), "{json}");
     assert!(json.contains("schema_version"), "{json}");
+}
+
+// ------------------------------------------------------------ portability
+
+#[test]
+fn the_stored_prompt_path_is_relative_so_a_move_needs_no_database_change() {
+    // Caught by smoke-testing a move: `init` used to store the absolute path, which
+    // looked correct and quietly undid migration 004 for every new story. `play`
+    // derives its media paths so it follows a moved folder; an absolute prompt_path
+    // would keep pointing at the old one — half a move, and only half reports it.
+    let dir = tmp();
+    let cfg = write_config(dir.path());
+    let (config, _) = init::init(Some(&cfg), &opts()).unwrap();
+
+    let store = Store::open(&config.db_path).unwrap();
+    let stored = store.story().unwrap().unwrap().prompt_path;
+    assert_eq!(stored, "prompt.md");
+    assert!(
+        !stored.starts_with('/'),
+        "an absolute path here breaks portability: {stored:?}"
+    );
+}
+
+#[test]
+fn a_moved_project_still_resolves_its_prompt() {
+    // The end-to-end property, without a fragile hand-rolled directory copy: what
+    // `init` stores must resolve correctly against *any* story_dir, because that is
+    // exactly what changes when the folder moves.
+    let first = tmp();
+    let cfg = write_config(first.path());
+    let (config, _) = init::init(Some(&cfg), &opts()).unwrap();
+
+    let store = Store::open(&config.db_path).unwrap();
+    let stored = store.story().unwrap().unwrap().prompt_path;
+
+    // Resolved against the original story_dir: the file that exists today.
+    let here = litrpg_config::resolve_path(Path::new(&stored), &config.story_dir);
+    assert_eq!(here, config.story_dir.join("prompt.md"));
+    assert!(here.exists());
+
+    // Resolved against a relocated story_dir: follows, with no database change.
+    let moved = tmp();
+    let there = litrpg_config::resolve_path(Path::new(&stored), moved.path());
+    assert_eq!(there, moved.path().join("prompt.md"));
+    assert_ne!(there, here, "a move must actually change where it looks");
+
+    // And it really is found there once the file travels with the folder.
+    std::fs::copy(&here, &there).unwrap();
+    assert!(there.exists());
+}
+
+#[test]
+fn init_creates_the_directory_holding_the_database() {
+    // `init` claims to produce a self-contained folder, and the directory holding the
+    // database is part of that claim. Before defaults went relative, `db_path`'s
+    // parent *was* the root and so existed incidentally; `data/story.db` makes it a
+    // directory that must actually be created. Asserted explicitly rather than left
+    // to `open_store`'s create_dir_all in main.rs, which is a different code path.
+    let dir = tmp();
+    let cfg = write_config(dir.path());
+    let (config, r) = init::init(Some(&cfg), &opts()).unwrap();
+
+    let db_parent = config.db_path.parent().unwrap();
+    assert!(db_parent.is_dir(), "{db_parent:?} was not created");
+    assert!(config.db_path.is_file(), "the database itself should exist");
+    assert!(
+        r.dirs_created.iter().any(|d| d == db_parent),
+        "it must be reported like the others: {:?}",
+        r.dirs_created
+    );
+}
+
+#[test]
+fn a_deeply_nested_database_path_has_every_level_created() {
+    let dir = tmp();
+    let cfg = dir.path().join("litrpg.toml");
+    std::fs::write(
+        &cfg,
+        format!(
+            "db_path = \"{}/a/b/c/story.db\"\nmedia_dir = \"{}/media\"\nstory_dir = \"{}/story\"\n",
+            dir.path().display(),
+            dir.path().display(),
+            dir.path().display()
+        ),
+    )
+    .unwrap();
+
+    let (config, _) = init::init(Some(&cfg), &opts()).unwrap();
+    assert!(dir.path().join("a/b/c").is_dir());
+    assert!(config.db_path.is_file());
+}
+
+#[test]
+fn the_relative_default_layout_creates_data_media_and_story() {
+    // The shipped defaults, not the test fixture's: `data/story.db`, `media`, `story`.
+    // This is the layout a real `litrpg init` in a project folder produces.
+    let dir = tmp();
+    let cfg = dir.path().join("litrpg.toml");
+    // Only a non-path key, so all three paths come from the relative defaults.
+    std::fs::write(&cfg, "target_words = 2000\n").unwrap();
+
+    let (config, r) = init::init(Some(&cfg), &opts()).unwrap();
+    assert_eq!(config.db_path, dir.path().join("data/story.db"));
+    assert!(dir.path().join("data").is_dir());
+    assert!(dir.path().join("media").is_dir());
+    assert!(dir.path().join("story").is_dir());
+    assert!(dir.path().join("story/prompt.md").is_file());
+
+    let names: Vec<String> = r
+        .dirs_created
+        .iter()
+        .map(|d| d.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    for expected in ["data", "media", "story"] {
+        assert!(names.contains(&expected.to_string()), "{names:?}");
+    }
 }

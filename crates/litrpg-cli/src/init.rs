@@ -200,7 +200,18 @@ fn ensure_story(
     prompt_hash: &str,
     opts: &InitOptions,
 ) -> Result<StoryOutcome> {
-    let prompt_path_str = prompt_path.display().to_string();
+    // Store the path **relative to `story_dir`**, matching what migration 004
+    // established. Writing the absolute path here would look fine and quietly undo
+    // 004 for every newly created story: `play` derives its media paths so it follows
+    // a moved folder, while an absolute `prompt_path` keeps pointing at the old
+    // location — half a move, which is worse than none because only half reports it.
+    //
+    // A prompt genuinely outside `story_dir` falls back to absolute, which
+    // `resolve_path` then honours verbatim.
+    let prompt_path_str = prompt_path
+        .strip_prefix(&config.story_dir)
+        .map(|rel| rel.display().to_string())
+        .unwrap_or_else(|_| prompt_path.display().to_string());
 
     match store.story()? {
         // Exists and we were not told to overwrite: leave it strictly alone.

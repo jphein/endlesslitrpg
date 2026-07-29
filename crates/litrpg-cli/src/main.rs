@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use litrpg_cli::{cast, init, note, play, prompt, read, render, rewind, state, status};
+use litrpg_cli::{cast, init, listened, note, play, prompt, read, render, rewind, state, status};
 use litrpg_config::Config;
 use litrpg_store::Store;
 
@@ -76,6 +76,12 @@ enum Command {
         /// Skip the interactive confirmation
         #[arg(long)]
         force: bool,
+    },
+
+    /// Record or show how far you have listened
+    Listened {
+        /// Chapter you have listened through; 0 means not started. Omit to show.
+        chapter: Option<u32>,
     },
 
     /// Print a chapter's prose (default: the latest)
@@ -214,7 +220,7 @@ fn main() -> Result<()> {
 
         Command::Status => {
             let store = open_store(&config)?;
-            let report = status::status(&store, config.buffer_target)?;
+            let report = status::status(&store, config.buffer_target, &config.story_dir)?;
             if cli.json {
                 print_json(&report)?;
             } else {
@@ -284,6 +290,19 @@ fn main() -> Result<()> {
             print!("{}", rewind::render_done(*chapter, rows));
         }
 
+        Command::Listened { chapter } => {
+            let store = open_store(&config)?;
+            let report = match chapter {
+                Some(n) => listened::set(&store, *n, config.buffer_target)?,
+                None => listened::show(&store, config.buffer_target)?,
+            };
+            if cli.json {
+                print_json(&report)?;
+            } else {
+                print!("{}", listened::render_text(&report));
+            }
+        }
+
         Command::Read { chapter, segments } => {
             let store = open_store(&config)?;
             let view = read::read(&store, *chapter)?;
@@ -302,7 +321,13 @@ fn main() -> Result<()> {
         } => {
             let store = open_store(&config)?;
             let path_env = std::env::var("PATH").ok();
-            let plan = play::plan(&store, *chapter, &play::players(), path_env.as_deref())?;
+            let plan = play::plan(
+                &store,
+                *chapter,
+                &play::players(),
+                path_env.as_deref(),
+                &config.media_dir,
+            )?;
             if cli.json {
                 print_json(&plan)?;
             } else if *print_command {

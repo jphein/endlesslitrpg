@@ -49,13 +49,13 @@ fn seg(idx: u32, speaker: &str, kind: SpeakerKind, voice: &str, a: u32, b: u32) 
 
 /// Attach audio, creating real files so the on-disk checks are exercised.
 fn attach(s: &Store, dir: &Path, n: u32, segments: Vec<Segment>) -> (PathBuf, PathBuf) {
+    // Names must match what `play` derives: media_dir + zero-padded NNNN.ext.
     let mp3 = dir.join(format!("{n:04}.mp3"));
     let pcm = dir.join(format!("{n:04}.pcm"));
     std::fs::write(&mp3, b"fake mp3").unwrap();
     std::fs::write(&pcm, b"fake pcm").unwrap();
     let m = Manifest::new(n, segments);
-    s.attach_audio(n, &m, pcm.to_str().unwrap(), mp3.to_str().unwrap())
-        .unwrap();
+    s.attach_audio(n, &m).unwrap();
     (mp3, pcm)
 }
 
@@ -344,9 +344,7 @@ fn the_store_refuses_to_create_a_non_contiguous_chapter_at_all() {
             ),
         ],
     );
-    let err = s
-        .attach_audio(1, &m, pcm.to_str().unwrap(), mp3.to_str().unwrap())
-        .unwrap_err();
+    let err = s.attach_audio(1, &m).unwrap_err();
     assert!(
         matches!(err, litrpg_store::StoreError::InvalidManifest { .. }),
         "got {err:?}"
@@ -431,6 +429,7 @@ fn play_prefers_mpv_with_the_mp3() {
         Some(1),
         &play::players(),
         Some(bin.path().to_str().unwrap()),
+        dir.path(),
     )
     .unwrap();
     assert_eq!(plan.source, Source::Mp3);
@@ -468,6 +467,7 @@ fn play_falls_through_to_the_next_installed_player() {
         Some(1),
         &play::players(),
         Some(bin.path().to_str().unwrap()),
+        dir.path(),
     )
     .unwrap();
     assert_eq!(plan.argv[0], "ffplay");
@@ -503,6 +503,7 @@ fn a_pcm_only_player_gets_the_pcm_file_and_explicit_format_flags() {
         Some(1),
         &play::players(),
         Some(bin.path().to_str().unwrap()),
+        dir.path(),
     )
     .unwrap();
     assert_eq!(plan.source, Source::RawPcm);
@@ -539,6 +540,7 @@ fn paplay_gets_pulseaudio_flavoured_raw_flags() {
         Some(1),
         &play::players(),
         Some(bin.path().to_str().unwrap()),
+        dir.path(),
     )
     .unwrap()
     .command_line();
@@ -592,6 +594,7 @@ fn a_pcm_only_player_is_skipped_when_the_pcm_has_been_pruned() {
         Some(1),
         &play::players(),
         Some(bin.path().to_str().unwrap()),
+        dir.path(),
     )
     .unwrap_err();
     assert!(matches!(err, CliError::NoPlayer { .. }), "got {err:?}");
@@ -601,9 +604,17 @@ fn a_pcm_only_player_is_skipped_when_the_pcm_has_been_pruned() {
 
 #[test]
 fn no_audio_yet_is_its_own_message_not_chapter_not_found() {
+    let dir = tmp();
     let s = store();
     chapter(&s, 1, "text shipped, render did not");
-    let err = play::plan(&s, Some(1), &play::players(), Some("/nonexistent")).unwrap_err();
+    let err = play::plan(
+        &s,
+        Some(1),
+        &play::players(),
+        Some("/nonexistent"),
+        dir.path(),
+    )
+    .unwrap_err();
     match &err {
         CliError::ChapterHasNoAudio { chapter } => assert_eq!(*chapter, 1),
         other => panic!("expected ChapterHasNoAudio, got {other:?}"),
@@ -641,7 +652,14 @@ fn recorded_audio_whose_file_is_gone_is_distinct_from_never_rendered() {
     std::fs::remove_file(&mp3).unwrap();
     std::fs::remove_file(&pcm).unwrap();
 
-    let err = play::plan(&s, Some(1), &play::players(), Some("/nonexistent")).unwrap_err();
+    let err = play::plan(
+        &s,
+        Some(1),
+        &play::players(),
+        Some("/nonexistent"),
+        dir.path(),
+    )
+    .unwrap_err();
     match &err {
         CliError::AudioFileMissing { chapter, looked } => {
             assert_eq!(*chapter, 1);
@@ -695,6 +713,7 @@ fn no_player_installed_names_what_was_tried() {
         Some(1),
         &play::players(),
         Some(empty.path().to_str().unwrap()),
+        dir.path(),
     )
     .unwrap_err();
     let msg = err.to_string();
@@ -730,6 +749,7 @@ fn play_with_no_argument_takes_the_latest() {
         None,
         &play::players(),
         Some(bin.path().to_str().unwrap()),
+        dir.path(),
     )
     .unwrap();
     assert_eq!(plan.chapter, 2);
@@ -737,10 +757,18 @@ fn play_with_no_argument_takes_the_latest() {
 
 #[test]
 fn play_reports_a_missing_chapter_like_read_does() {
+    let dir = tmp();
     let s = store();
     chapter(&s, 1, "a");
     assert!(matches!(
-        play::plan(&s, Some(7), &play::players(), Some("/nonexistent")).unwrap_err(),
+        play::plan(
+            &s,
+            Some(7),
+            &play::players(),
+            Some("/nonexistent"),
+            dir.path()
+        )
+        .unwrap_err(),
         CliError::NoSuchChapter {
             wanted: 7,
             latest: 1
@@ -775,6 +803,7 @@ fn the_printed_command_is_the_command_that_would_run() {
         Some(1),
         &play::players(),
         Some(bin.path().to_str().unwrap()),
+        dir.path(),
     )
     .unwrap();
     let line = plan.command_line();
@@ -805,11 +834,13 @@ fn a_path_with_spaces_is_quoted_in_the_printed_command() {
             1000,
         )],
     );
+    // media_dir is the directory whose name contains the space.
     let line = play::plan(
         &s,
         Some(1),
         &play::players(),
         Some(bin.path().to_str().unwrap()),
+        &sub,
     )
     .unwrap()
     .command_line();
@@ -844,6 +875,7 @@ fn play_serialises_its_plan() {
         Some(1),
         &play::players(),
         Some(bin.path().to_str().unwrap()),
+        dir.path(),
     )
     .unwrap();
     let json = serde_json::to_string(&plan).unwrap();
@@ -933,7 +965,7 @@ fn plan_with(argv: &[&str], dir: &Path, bin: &Path, s: &Store) -> play::PlayPlan
         argv: argv.iter().map(|a| a.to_string()).collect(),
         source: Source::Mp3,
     }];
-    play::plan(s, Some(1), &candidates, Some(bin.to_str().unwrap())).unwrap()
+    play::plan(s, Some(1), &candidates, Some(bin.to_str().unwrap()), dir).unwrap()
 }
 
 #[test]
@@ -956,4 +988,141 @@ fn a_player_that_exits_nonzero_is_reported_with_its_status() {
         CliError::PlayerFailed { status, .. } => assert!(status.contains("exit code"), "{status}"),
         other => panic!("expected PlayerFailed, got {other:?}"),
     }
+}
+
+// ------------------------------------------------- derived media paths
+
+#[test]
+fn media_paths_are_derived_zero_padded_from_the_chapter_number() {
+    let dir = std::path::Path::new("/srv/litrpg/media");
+    assert_eq!(
+        play::media_path(dir, 1, "mp3"),
+        std::path::Path::new("/srv/litrpg/media/0001.mp3")
+    );
+    assert_eq!(
+        play::media_path(dir, 42, "pcm"),
+        std::path::Path::new("/srv/litrpg/media/0042.pcm")
+    );
+    // Four digits is a minimum, not a truncation: chapter 12345 must not become 2345.
+    assert_eq!(
+        play::media_path(dir, 12345, "mp3"),
+        std::path::Path::new("/srv/litrpg/media/12345.mp3")
+    );
+}
+
+#[test]
+fn the_derived_names_match_what_the_daemon_serves() {
+    // The daemon builds `/media/{:04}.mp3` from its own literal. If these ever
+    // disagree, `litrpg play` and the watch would fetch different files.
+    for n in [1u32, 9, 10, 99, 100, 1000, 9999] {
+        let derived = play::media_path(std::path::Path::new("/m"), n, "mp3");
+        assert_eq!(
+            derived.file_name().unwrap().to_str().unwrap(),
+            format!("{n:04}.mp3")
+        );
+    }
+}
+
+#[test]
+fn moving_the_media_directory_needs_no_database_change() {
+    // The failure this replaces: paths were stored absolute, so moving the folder
+    // left rows pointing at a deleted directory and playback broke silently.
+    // Derive-and-stat makes that structurally impossible.
+    let bin = tmp();
+    fake_exe(bin.path(), "mpv");
+    let s = store();
+    chapter(&s, 1, "text");
+
+    let first = tmp();
+    attach(
+        &s,
+        first.path(),
+        1,
+        vec![seg(
+            0,
+            "narrator",
+            SpeakerKind::Narrator,
+            "sherpa:x:0",
+            0,
+            1000,
+        )],
+    );
+    let before = play::plan(
+        &s,
+        Some(1),
+        &play::players(),
+        Some(bin.path().to_str().unwrap()),
+        first.path(),
+    )
+    .unwrap();
+    assert!(before.path.starts_with(first.path()));
+
+    // "Move" the media: same files, new directory, no database write at all.
+    let second = tmp();
+    std::fs::write(second.path().join("0001.mp3"), b"fake mp3").unwrap();
+    std::fs::write(second.path().join("0001.pcm"), b"fake pcm").unwrap();
+
+    let after = play::plan(
+        &s,
+        Some(1),
+        &play::players(),
+        Some(bin.path().to_str().unwrap()),
+        second.path(),
+    )
+    .unwrap();
+    assert_eq!(after.path, second.path().join("0001.mp3"));
+    assert_ne!(after.path, before.path);
+}
+
+#[test]
+fn a_missing_derived_file_names_both_paths_it_tried() {
+    let empty = tmp();
+    let s = store();
+    chapter(&s, 1, "text");
+    // has_audio without the files present on this media_dir.
+    attach(
+        &s,
+        empty.path(),
+        1,
+        vec![seg(
+            0,
+            "narrator",
+            SpeakerKind::Narrator,
+            "sherpa:x:0",
+            0,
+            1000,
+        )],
+    );
+    std::fs::remove_file(empty.path().join("0001.mp3")).unwrap();
+    std::fs::remove_file(empty.path().join("0001.pcm")).unwrap();
+
+    let err = play::plan(
+        &s,
+        Some(1),
+        &play::players(),
+        Some("/nonexistent"),
+        empty.path(),
+    )
+    .unwrap_err();
+    match &err {
+        CliError::AudioFileMissing { looked, .. } => {
+            assert!(looked.contains("0001.mp3"), "{looked}");
+            assert!(looked.contains("0001.pcm"), "{looked}");
+            assert!(looked.starts_with("no file at"), "{looked}");
+        }
+        other => panic!("expected AudioFileMissing, got {other:?}"),
+    }
+}
+
+#[test]
+fn read_no_longer_exposes_media_paths() {
+    // They were dropped with migration 004 because they restated media_dir + NNNN.ext.
+    let s = store();
+    chapter(&s, 1, "text");
+    let json = serde_json::to_string(&read::read(&s, Some(1)).unwrap()).unwrap();
+    assert!(!json.contains("mp3_path"), "{json}");
+    assert!(!json.contains("pcm_path"), "{json}");
+    // The facts a caller actually needs to derive them are still there.
+    assert!(json.contains("\"number\":1"), "{json}");
+    assert!(json.contains("has_audio"), "{json}");
 }

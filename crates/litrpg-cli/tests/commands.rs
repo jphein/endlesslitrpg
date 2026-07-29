@@ -4,6 +4,7 @@ use litrpg_core::ledger::Op;
 use litrpg_core::manifest::{Manifest, Segment, SpeakerKind};
 use litrpg_core::validate::Delta;
 use litrpg_store::{NewChapter, Store};
+use std::path::Path;
 use tempfile::TempDir;
 
 // ------------------------------------------------------------------ helpers
@@ -70,8 +71,7 @@ fn give_audio(s: &Store, n: u32) {
             end_ms: 1000,
         }],
     );
-    s.attach_audio(n, &m, &format!("{n}.pcm"), &format!("{n}.mp3"))
-        .unwrap();
+    s.attach_audio(n, &m).unwrap();
 }
 
 // --------------------------------------------------------------------- note
@@ -115,13 +115,13 @@ fn empty_and_whitespace_notes_are_refused_and_not_stored() {
 
 #[test]
 fn cast_list_is_empty_on_a_fresh_store() {
-    assert!(cast::list(&store()).unwrap().is_empty());
+    assert!(cast::list(&store()).unwrap().entries.is_empty());
 }
 
 #[test]
 fn cast_list_reports_entries_with_the_backend_split_out() {
     let s = with_kaelen();
-    let entries = cast::list(&s).unwrap();
+    let entries = cast::list(&s).unwrap().entries;
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].speaker, "Kaelen");
     assert_eq!(entries[0].kind, "character");
@@ -142,7 +142,7 @@ fn cast_set_overrides_an_existing_voice_and_preserves_provenance() {
         }
     );
 
-    let row = &cast::list(&s).unwrap()[0];
+    let row = &cast::list(&s).unwrap().entries[0];
     assert_eq!(row.voice_ref, "azure:en-GB-RyanNeural");
     // kind and first_chapter are provenance — an override must not rewrite them.
     assert_eq!(row.kind, "character");
@@ -159,7 +159,7 @@ fn cast_set_refuses_an_unknown_speaker_without_new() {
         matches!(&err, CliError::UnknownSpeaker { speaker } if speaker == "Kaelenn"),
         "got {err:?}"
     );
-    assert_eq!(cast::list(&s).unwrap().len(), 1);
+    assert_eq!(cast::list(&s).unwrap().entries.len(), 1);
     assert!(!s.known_subjects().unwrap().contains("Kaelenn"));
 }
 
@@ -198,7 +198,7 @@ fn cast_set_honours_an_explicit_kind() {
         outcome,
         cast::CastSetOutcome::Added { ref kind, .. } if kind == "system"
     ));
-    assert_eq!(cast::list(&s).unwrap()[0].kind, "system");
+    assert_eq!(cast::list(&s).unwrap().entries[0].kind, "system");
 }
 
 #[test]
@@ -213,7 +213,7 @@ fn cast_set_validates_the_voice_ref_before_writing_anything() {
     }
     // Unchanged: validation happens before the write.
     assert_eq!(
-        cast::list(&s).unwrap()[0].voice_ref,
+        cast::list(&s).unwrap().entries[0].voice_ref,
         "sherpa:kokoro-multi-lang-v1_0:18"
     );
 }
@@ -230,7 +230,7 @@ fn cast_set_accepts_an_azure_ref_whose_remainder_contains_a_colon() {
         None,
     )
     .unwrap();
-    let row = &cast::list(&s).unwrap()[0];
+    let row = &cast::list(&s).unwrap().entries[0];
     assert_eq!(row.voice_ref, "azure:en-GB-Ada:DragonHDLatestNeural");
     assert_eq!(row.backend.as_deref(), Some("azure"));
 }
@@ -239,11 +239,13 @@ fn cast_set_accepts_an_azure_ref_whose_remainder_contains_a_colon() {
 
 #[test]
 fn status_on_an_empty_store_is_all_zeros_and_quiet() {
-    let r = status::status(&store(), 3).unwrap();
+    let r = status::status(&store(), 3, Path::new("/nonexistent")).unwrap();
     assert_eq!(r.latest_chapter, 0);
     assert_eq!(r.total_chapters, 0);
     assert_eq!(r.chapters_with_audio, 0);
-    assert_eq!(r.rendered_tail, 0);
+    assert_eq!(r.consumed_through, 0);
+    assert_eq!(r.playable_ahead, 0);
+    assert_eq!(r.chapters_ahead, 0);
     assert_eq!(r.applied_deltas, 0);
     assert_eq!(r.rejected_deltas, 0);
     assert_eq!(r.rejection_rate, 0.0);
@@ -261,28 +263,32 @@ fn status_counts_chapters_and_audio() {
     give_audio(&s, 3);
     give_audio(&s, 4);
 
-    let r = status::status(&s, 2).unwrap();
+    let r = status::status(&s, 2, Path::new("/nonexistent")).unwrap();
     assert_eq!(r.latest_chapter, 4);
     assert_eq!(r.total_chapters, 4);
     assert_eq!(r.chapters_with_audio, 3);
-    // Contiguous run back from the latest is 4 and 3 — chapter 2 breaks it.
-    assert_eq!(r.rendered_tail, 2);
-    assert!(r.buffer_ok);
+    // Cursor is 0, so the playable run starts at chapter 1: only chapter 1 is
+    // rendered before the gap at 2, even though 3 and 4 are rendered too.
+    assert_eq!(r.consumed_through, 0);
+    assert_eq!(r.playable_ahead, 1);
+    assert_eq!(r.chapters_ahead, 3);
+    assert!(!r.buffer_ok);
 }
 
 #[test]
-fn rendered_tail_stops_at_the_first_gap_below_the_latest() {
+fn the_playable_run_is_measured_forwards_from_the_cursor() {
     let s = store();
     for n in 1..=3 {
         add_chapter(&s, n);
     }
-    // Latest chapter has no audio at all: nothing is ready to play next.
+    // 1 and 2 rendered, 3 not. From a cursor of 0 the listener can play two
+    // chapters and then stalls.
     give_audio(&s, 1);
     give_audio(&s, 2);
-    let r = status::status(&s, 2).unwrap();
+    let r = status::status(&s, 2, Path::new("/nonexistent")).unwrap();
     assert_eq!(r.chapters_with_audio, 2);
-    assert_eq!(r.rendered_tail, 0);
-    assert!(!r.buffer_ok);
+    assert_eq!(r.playable_ahead, 2);
+    assert!(r.buffer_ok);
 }
 
 #[test]
@@ -292,8 +298,22 @@ fn status_reports_buffer_against_the_configured_target() {
         add_chapter(&s, n);
         give_audio(&s, n);
     }
-    assert!(status::status(&s, 2).unwrap().buffer_ok);
-    assert!(!status::status(&s, 3).unwrap().buffer_ok);
+    assert!(
+        status::status(&s, 2, Path::new("/nonexistent"))
+            .unwrap()
+            .buffer_ok
+    );
+    assert!(
+        !status::status(&s, 3, Path::new("/nonexistent"))
+            .unwrap()
+            .buffer_ok
+    );
+    assert_eq!(
+        status::status(&s, 3, Path::new("/nonexistent"))
+            .unwrap()
+            .playable_ahead,
+        2
+    );
 }
 
 #[test]
@@ -309,7 +329,7 @@ fn status_reports_applied_and_rejected_delta_counts_and_rate() {
         .unwrap()
         .unwrap_err();
 
-    let r = status::status(&s, 3).unwrap();
+    let r = status::status(&s, 3, Path::new("/nonexistent")).unwrap();
     assert_eq!(r.applied_deltas, 2);
     assert_eq!(r.rejected_deltas, 1);
     assert_eq!(r.total_deltas(), 3);
@@ -339,7 +359,7 @@ fn top_rejections_group_by_code_without_fragmenting_on_payload() {
         .unwrap()
         .unwrap_err();
 
-    let r = status::status(&s, 3).unwrap();
+    let r = status::status(&s, 3, Path::new("/nonexistent")).unwrap();
     assert_eq!(r.rejected_deltas, 2);
     assert_eq!(r.top_rejections.len(), 1, "{:?}", r.top_rejections);
     assert_eq!(r.top_rejections[0].code, "HpAboveMax");
@@ -360,7 +380,7 @@ fn top_rejections_are_ordered_most_frequent_first() {
         .unwrap()
         .unwrap_err();
 
-    let r = status::status(&s, 3).unwrap();
+    let r = status::status(&s, 3, Path::new("/nonexistent")).unwrap();
     assert_eq!(r.top_rejections[0].code, "UnknownField");
     assert_eq!(r.top_rejections[0].count, 2);
     assert_eq!(r.top_rejections[1].code, "UnknownSubject");
@@ -381,12 +401,12 @@ fn a_rewind_does_not_inflate_the_rejection_metrics() {
         .unwrap()
         .unwrap_err();
 
-    let before = status::status(&s, 3).unwrap();
+    let before = status::status(&s, 3, Path::new("/nonexistent")).unwrap();
     assert_eq!(before.rejected_deltas, 1);
 
     s.rewind(1).unwrap();
 
-    let after = status::status(&s, 3).unwrap();
+    let after = status::status(&s, 3, Path::new("/nonexistent")).unwrap();
     assert_eq!(after.rejected_deltas, 1, "rewound rows are not rejections");
     assert_eq!(after.applied_deltas, 1);
     assert!(
@@ -408,7 +428,12 @@ fn status_surfaces_dirty_chapters() {
         state_dirty: true,
     })
     .unwrap();
-    assert_eq!(status::status(&s, 3).unwrap().dirty_chapters, vec![2]);
+    assert_eq!(
+        status::status(&s, 3, Path::new("/nonexistent"))
+            .unwrap()
+            .dirty_chapters,
+        vec![2]
+    );
 }
 
 #[test]
@@ -421,7 +446,7 @@ fn status_text_makes_the_drift_signal_visible() {
         .unwrap()
         .unwrap_err();
 
-    let out = status::render_text(&status::status(&s, 3).unwrap());
+    let out = status::render_text(&status::status(&s, 3, Path::new("/nonexistent")).unwrap());
     assert!(out.contains("reject rate"), "{out}");
     assert!(out.contains("UnknownField"), "{out}");
     assert!(out.contains("§6.2"), "{out}");
@@ -436,11 +461,22 @@ fn status_text_is_quiet_when_the_rate_is_healthy() {
             .unwrap()
             .unwrap();
     }
-    let out = status::render_text(&status::status(&s, 3).unwrap());
+    let out = status::render_text(&status::status(&s, 3, Path::new("/nonexistent")).unwrap());
     assert!(!out.contains("**"), "no warning expected:\n{out}");
 }
 
 // ------------------------------------------------------- prompt sync
+
+fn story_with_prompt_rel(s: &Store, rel: &str, hash: &str) {
+    s.upsert_story(&litrpg_store::NewStory {
+        title: "The Ashen Vale".into(),
+        protagonist: "Kaelen".into(),
+        prompt_path: rel.into(),
+        prompt_hash: hash.into(),
+        target_words: 2000,
+    })
+    .unwrap();
+}
 
 fn story_with_prompt(s: &Store, path: &std::path::Path, hash: &str) {
     s.upsert_story(&litrpg_store::NewStory {
@@ -455,7 +491,7 @@ fn story_with_prompt(s: &Store, path: &std::path::Path, hash: &str) {
 
 #[test]
 fn no_story_row_reports_not_initialised() {
-    let r = status::status(&store(), 3).unwrap();
+    let r = status::status(&store(), 3, Path::new("/nonexistent")).unwrap();
     assert_eq!(r.prompt, status::PromptSync::NotInitialised);
     assert!(!r.prompt_edit_pending);
     let out = status::render_text(&r);
@@ -473,7 +509,7 @@ fn a_prompt_matching_the_row_says_nothing_at_all() {
     let s = store();
     story_with_prompt(&s, &path, &content_hash("# A premise\n"));
 
-    let r = status::status(&s, 3).unwrap();
+    let r = status::status(&s, 3, Path::new("/nonexistent")).unwrap();
     assert!(matches!(r.prompt, status::PromptSync::InSync { .. }));
     assert!(!r.prompt_edit_pending);
     let out = status::render_text(&r);
@@ -490,7 +526,7 @@ fn an_edited_prompt_is_reported_as_pending_with_both_hashes() {
     story_with_prompt(&s, &path, &content_hash("# Old premise\n"));
     std::fs::write(&path, "# New premise\n").unwrap();
 
-    let r = status::status(&s, 3).unwrap();
+    let r = status::status(&s, 3, Path::new("/nonexistent")).unwrap();
     assert!(r.prompt_edit_pending);
     match &r.prompt {
         status::PromptSync::Pending {
@@ -525,7 +561,7 @@ fn a_missing_prompt_file_is_named_not_treated_as_in_sync() {
     let s = store();
     story_with_prompt(&s, &path, &content_hash("# Old premise\n"));
 
-    let r = status::status(&s, 3).unwrap();
+    let r = status::status(&s, 3, Path::new("/nonexistent")).unwrap();
     assert!(!r.prompt_edit_pending, "missing is not a pending edit");
     match &r.prompt {
         status::PromptSync::Missing { path: p, in_effect } => {
@@ -550,29 +586,74 @@ fn an_empty_in_effect_hash_still_compares_rather_than_crashing() {
     let s = store();
     story_with_prompt(&s, &path, "");
 
-    let r = status::status(&s, 3).unwrap();
+    let r = status::status(&s, 3, Path::new("/nonexistent")).unwrap();
     assert!(r.prompt_edit_pending);
 }
 
 #[test]
-fn prompt_sync_uses_the_path_the_row_names_not_the_config() {
-    // The row records where the in-effect prompt came from. If story_dir has since
-    // moved in config, the row's view is the honest comparison.
+fn a_relative_prompt_path_is_joined_against_story_dir() {
+    // Migration 004 made `story.prompt_path` relative to `story_dir`. The old version
+    // of this test used a decoy file at another path to prove the row's location won
+    // over the config's; that premise is gone, because a relative basename cannot
+    // point outside the configured story dir. The staleness became unrepresentable,
+    // which is better than detecting it — so what is asserted now is the join.
     let dir = tmp();
-    let named = dir.path().join("recorded/prompt.md");
-    std::fs::create_dir_all(named.parent().unwrap()).unwrap();
-    std::fs::write(&named, "# Recorded\n").unwrap();
-    // A decoy at a different location with different content.
-    let decoy = dir.path().join("elsewhere/prompt.md");
-    std::fs::create_dir_all(decoy.parent().unwrap()).unwrap();
-    std::fs::write(&decoy, "# Decoy\n").unwrap();
+    std::fs::write(dir.path().join("prompt.md"), "# Recorded\n").unwrap();
 
     let s = store();
-    story_with_prompt(&s, &named, &content_hash("# Recorded\n"));
+    story_with_prompt_rel(&s, "prompt.md", &content_hash("# Recorded\n"));
+    assert!(
+        matches!(
+            status::status(&s, 3, dir.path()).unwrap().prompt,
+            status::PromptSync::InSync { .. }
+        ),
+        "a bare basename must resolve inside story_dir"
+    );
+
+    // And a different story_dir looks for it there, not where it used to be.
+    let elsewhere = tmp();
     assert!(matches!(
-        status::status(&s, 3).unwrap().prompt,
-        status::PromptSync::InSync { .. }
+        status::status(&s, 3, elsewhere.path()).unwrap().prompt,
+        status::PromptSync::Missing { .. }
     ));
+}
+
+#[test]
+fn an_absolute_prompt_path_is_honoured_rather_than_mangled() {
+    // Resolution reuses `litrpg_config::resolve_path`, so a row still holding an
+    // absolute path from before migration 004 keeps working instead of being joined
+    // into `<story_dir>/home/jp/...`. That is what stops the migration stranding a
+    // database, and it preserves pointing the prompt somewhere else deliberately.
+    let elsewhere = tmp();
+    let abs = elsewhere.path().join("my-prompt.md");
+    std::fs::write(&abs, "# Absolute\n").unwrap();
+
+    let s = store();
+    story_with_prompt(&s, &abs, &content_hash("# Absolute\n"));
+
+    let story_dir = tmp();
+    assert!(
+        matches!(
+            status::status(&s, 3, story_dir.path()).unwrap().prompt,
+            status::PromptSync::InSync { .. }
+        ),
+        "absolute must be used verbatim"
+    );
+}
+
+#[test]
+fn a_relative_prompt_path_that_is_missing_names_the_resolved_location() {
+    // The reported path must be where it actually looked, not the bare basename —
+    // otherwise the operator goes hunting for "prompt.md" with no directory.
+    let dir = tmp();
+    let s = store();
+    story_with_prompt_rel(&s, "prompt.md", "fnv1a64:0000000000000000");
+    match status::status(&s, 3, dir.path()).unwrap().prompt {
+        status::PromptSync::Missing { path, .. } => {
+            assert_eq!(path, dir.path().join("prompt.md"));
+        }
+        other => panic!("expected Missing, got {other:?}"),
+    }
 }
 
 #[test]
@@ -583,7 +664,8 @@ fn prompt_sync_is_exposed_in_json_as_a_boolean_and_both_hashes() {
     story_with_prompt(&s, &path, &content_hash("# Old\n"));
     std::fs::write(&path, "# New\n").unwrap();
 
-    let json = serde_json::to_string(&status::status(&s, 3).unwrap()).unwrap();
+    let json =
+        serde_json::to_string(&status::status(&s, 3, Path::new("/nonexistent")).unwrap()).unwrap();
     assert!(json.contains("\"prompt_edit_pending\":true"), "{json}");
     assert!(json.contains("\"state\":\"pending\""), "{json}");
     assert!(json.contains(&content_hash("# Old\n")), "{json}");
@@ -592,14 +674,17 @@ fn prompt_sync_is_exposed_in_json_as_a_boolean_and_both_hashes() {
 
 #[test]
 fn json_reports_not_initialised_and_missing_distinctly() {
-    let empty = serde_json::to_string(&status::status(&store(), 3).unwrap()).unwrap();
+    let empty =
+        serde_json::to_string(&status::status(&store(), 3, Path::new("/nonexistent")).unwrap())
+            .unwrap();
     assert!(empty.contains("\"state\":\"not_initialised\""), "{empty}");
     assert!(empty.contains("\"prompt_edit_pending\":false"), "{empty}");
 
     let dir = tmp();
     let s = store();
     story_with_prompt(&s, &dir.path().join("gone.md"), "fnv1a64:0000000000000000");
-    let missing = serde_json::to_string(&status::status(&s, 3).unwrap()).unwrap();
+    let missing =
+        serde_json::to_string(&status::status(&s, 3, Path::new("/nonexistent")).unwrap()).unwrap();
     assert!(missing.contains("\"state\":\"missing\""), "{missing}");
     assert!(
         missing.contains("\"prompt_edit_pending\":false"),
@@ -622,7 +707,7 @@ fn a_pending_prompt_does_not_suppress_the_drift_signal() {
         .unwrap()
         .unwrap_err();
 
-    let out = status::render_text(&status::status(&s, 3).unwrap());
+    let out = status::render_text(&status::status(&s, 3, Path::new("/nonexistent")).unwrap());
     assert!(out.contains("Prompt edit pending"), "{out}");
     assert!(out.contains("reject rate"), "{out}");
     assert!(out.contains("UnknownField"), "{out}");
@@ -975,9 +1060,11 @@ fn status_state_and_cast_serialize_to_json() {
         .unwrap()
         .unwrap();
 
-    let status_json = serde_json::to_string(&status::status(&s, 3).unwrap()).unwrap();
+    let status_json =
+        serde_json::to_string(&status::status(&s, 3, Path::new("/nonexistent")).unwrap()).unwrap();
     assert!(status_json.contains("rejection_rate"), "{status_json}");
-    assert!(status_json.contains("rendered_tail"), "{status_json}");
+    assert!(status_json.contains("playable_ahead"), "{status_json}");
+    assert!(status_json.contains("consumed_through"), "{status_json}");
 
     let state_json = serde_json::to_string(&state::state(&s, None).unwrap()).unwrap();
     assert!(state_json.contains("Kaelen"), "{state_json}");
@@ -985,4 +1072,119 @@ fn status_state_and_cast_serialize_to_json() {
 
     let cast_json = serde_json::to_string(&cast::list(&s).unwrap()).unwrap();
     assert!(cast_json.contains("voice_ref"), "{cast_json}");
+}
+
+// -------------------------------------------- observed voice substitution
+
+fn render_speaker(s: &Store, chapter_no: u32, speaker: &str, voice: &str) {
+    add_chapter(s, chapter_no);
+    let m = Manifest::new(
+        chapter_no,
+        vec![Segment {
+            idx: 0,
+            speaker: speaker.into(),
+            kind: SpeakerKind::Character,
+            voice_ref: voice.into(),
+            text: "Line.".into(),
+            start_ms: 0,
+            end_ms: 1000,
+        }],
+    );
+    s.attach_audio(chapter_no, &m).unwrap();
+}
+
+#[test]
+fn a_cast_row_matching_the_rendered_audio_is_not_flagged() {
+    let s = with_kaelen();
+    render_speaker(&s, 1, "Kaelen", "sherpa:kokoro-multi-lang-v1_0:18");
+    let listing = cast::list(&s).unwrap();
+    assert_eq!(listing.entries[0].rendered_as, None);
+    assert_eq!(listing.substituted().count(), 0);
+    let out = cast::render_list(&listing);
+    assert!(!out.contains("!!"), "{out}");
+}
+
+#[test]
+fn a_substituted_voice_is_flagged_with_what_was_actually_used() {
+    // An Azure-only build substitutes at render time without rewriting the cast row,
+    // so `litrpg cast` shows sherpa while the audio is Azure. Without this, comparing
+    // the table against a manifest reads as a bug.
+    let s = with_kaelen();
+    render_speaker(&s, 1, "Kaelen", "azure:en-GB-Ada:DragonHDLatestNeural");
+
+    let listing = cast::list(&s).unwrap();
+    assert_eq!(
+        listing.entries[0].rendered_as.as_deref(),
+        Some("azure:en-GB-Ada:DragonHDLatestNeural")
+    );
+    assert_eq!(listing.substituted().count(), 1);
+
+    let out = cast::render_list(&listing);
+    assert!(out.contains("!!"), "{out}");
+    assert!(
+        out.contains("rendered as azure:en-GB-Ada:DragonHDLatestNeural"),
+        "{out}"
+    );
+    assert!(
+        out.contains("story's intent"),
+        "must say which one is authoritative:\n{out}"
+    );
+}
+
+#[test]
+fn the_most_recent_render_wins_when_the_voice_changed_over_time() {
+    let s = with_kaelen();
+    render_speaker(&s, 1, "Kaelen", "azure:old-voice:0");
+    render_speaker(&s, 2, "Kaelen", "azure:new-voice:0");
+    assert_eq!(
+        cast::list(&s).unwrap().entries[0].rendered_as.as_deref(),
+        Some("azure:new-voice:0")
+    );
+}
+
+#[test]
+fn a_speaker_never_rendered_makes_no_claim_either_way() {
+    // Silence is not evidence of agreement.
+    let s = with_kaelen();
+    add_chapter(&s, 1); // text only, no audio
+    let listing = cast::list(&s).unwrap();
+    assert_eq!(listing.entries[0].rendered_as, None);
+    assert!(listing.scanned.is_empty(), "{:?}", listing.scanned);
+}
+
+#[test]
+fn only_rendered_chapters_are_scanned() {
+    let s = with_kaelen();
+    add_chapter(&s, 1);
+    render_speaker(&s, 2, "Kaelen", "azure:x:0");
+    add_chapter(&s, 3);
+    let listing = cast::list(&s).unwrap();
+    assert_eq!(listing.scanned, vec![2]);
+}
+
+#[test]
+fn the_scan_window_is_bounded_and_newest_first() {
+    // One query per chapter, so an endless story must not make `litrpg cast` slow.
+    let s = with_kaelen();
+    for n in 1..=(cast::SUBSTITUTION_SCAN_LIMIT as u32 + 5) {
+        render_speaker(&s, n, "Kaelen", "azure:x:0");
+    }
+    let listing = cast::list(&s).unwrap();
+    assert_eq!(listing.scanned.len(), cast::SUBSTITUTION_SCAN_LIMIT);
+    let newest = cast::SUBSTITUTION_SCAN_LIMIT as u32 + 5;
+    assert_eq!(listing.scanned[0], newest, "newest first");
+    assert!(!listing.scanned.contains(&1), "oldest must fall outside");
+}
+
+#[test]
+fn substitution_is_exposed_in_json() {
+    let s = with_kaelen();
+    render_speaker(&s, 1, "Kaelen", "azure:en-GB-Ada:DragonHDLatestNeural");
+    let json = serde_json::to_string(&cast::list(&s).unwrap()).unwrap();
+    assert!(json.contains("rendered_as"), "{json}");
+    assert!(
+        json.contains("azure:en-GB-Ada:DragonHDLatestNeural"),
+        "{json}"
+    );
+    assert!(json.contains("\"scanned\":[1]"), "{json}");
 }

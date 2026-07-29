@@ -16,6 +16,14 @@
 //! One consequence worth knowing: §8 prunes `.pcm` outside the buffer window, so the
 //! ALSA/PulseAudio candidates have no source for an older chapter and are skipped for
 //! it. `mpv`/`ffplay` are unaffected because `.mp3` is permanent.
+//!
+//! # Paths are derived and stat'd, never read from the database
+//!
+//! Migration 004 dropped `chapters.{mp3,pcm}_path`: a column that always held
+//! `media_dir` + `NNNN.ext` carried no information and had to be rewritten on every
+//! move, which is how playback silently broke once already. Deriving and then stat'ing
+//! makes that failure structurally impossible — move the folder, update `media_dir`,
+//! and the paths follow.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -86,6 +94,18 @@ pub fn players() -> Vec<Player> {
     ]
 }
 
+/// Zero-padded artifact filename for a chapter: `0042.mp3` (spec §8).
+///
+/// **This convention is currently written out in six places** — the engine's
+/// `path_for`, five literals across the daemon's chapter and feed handlers, and here.
+/// Nothing forces them to agree, which is the same shape as `content_hash` before it
+/// was hoisted into `litrpg-core`. It should live there too; §8 gives it three
+/// consumers (engine writes, daemon serves, CLI plays), which is precisely the
+/// argument that put `Manifest` in core.
+pub fn media_path(media_dir: &Path, chapter: u32, ext: &str) -> PathBuf {
+    media_dir.join(format!("{chapter:04}.{ext}"))
+}
+
 /// Whether `cmd` is an executable reachable from `path_env`.
 ///
 /// A name containing a separator is treated as a literal path, so an injected
@@ -154,6 +174,7 @@ pub fn plan(
     wanted: Option<u32>,
     candidates: &[Player],
     path_env: Option<&str>,
+    media_dir: &Path,
 ) -> Result<PlayPlan> {
     let number = resolve_number(store, wanted)?;
     let row = store.chapter(number)?;
@@ -162,26 +183,22 @@ pub fn plan(
         return Err(CliError::ChapterHasNoAudio { chapter: number });
     }
 
-    let mp3 = row.mp3_path.as_deref().map(PathBuf::from);
-    let pcm = row.pcm_path.as_deref().map(PathBuf::from);
+    let derived_mp3 = media_path(media_dir, number, "mp3");
+    let derived_pcm = media_path(media_dir, number, "pcm");
 
-    // `has_audio` is a database flag; the files are on a filesystem that can be
-    // pruned, moved or unmounted underneath it. Distinguish "not rendered" from
-    // "rendered but the file is gone" — they call for different actions.
-    let mp3 = mp3.filter(|p| p.is_file());
-    let pcm = pcm.filter(|p| p.is_file());
+    // `has_audio` is a database flag; the files live on a filesystem that can be
+    // pruned or unmounted underneath it. Stat rather than trust, and distinguish
+    // "not rendered" from "rendered but absent" — different actions.
+    let mp3 = Some(derived_mp3.clone()).filter(|p| p.is_file());
+    let pcm = Some(derived_pcm.clone()).filter(|p| p.is_file());
     if mp3.is_none() && pcm.is_none() {
-        let recorded: Vec<String> = [row.mp3_path, row.pcm_path].into_iter().flatten().collect();
         return Err(CliError::AudioFileMissing {
             chapter: number,
-            // Two distinct states, and "looked for: " with nothing after it helps
-            // no one: paths recorded but pruned means restore the media; no paths
-            // at all means the attach never completed and the row is inconsistent.
-            looked: if recorded.is_empty() {
-                "no media paths are recorded on the chapter row".to_string()
-            } else {
-                format!("no file at {}", recorded.join(" or "))
-            },
+            looked: format!(
+                "no file at {} or {}",
+                derived_mp3.display(),
+                derived_pcm.display()
+            ),
         });
     }
 

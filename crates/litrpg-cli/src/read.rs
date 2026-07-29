@@ -88,8 +88,9 @@ pub struct ChapterView {
     pub title: String,
     pub text_md: String,
     pub prompt_hash: String,
-    pub pcm_path: Option<String>,
-    pub mp3_path: Option<String>,
+    // No `mp3_path`/`pcm_path`: migration 004 dropped those columns because they
+    // always restated `media_dir` + `NNNN.ext`. A caller that wants them derives
+    // them the way `play` does — see `play::media_path`.
     pub duration_ms: u32,
     pub has_audio: bool,
     pub state_dirty: bool,
@@ -107,8 +108,6 @@ pub fn read(store: &Store, wanted: Option<u32>) -> Result<ChapterView> {
         title: row.title,
         text_md: row.text_md,
         prompt_hash: row.prompt_hash,
-        pcm_path: row.pcm_path,
-        mp3_path: row.mp3_path,
         duration_ms: row.duration_ms,
         has_audio: row.has_audio,
         state_dirty: row.state_dirty,

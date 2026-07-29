@@ -65,14 +65,18 @@ pub enum ConfigError {
 
 pub type Result<T> = core::result::Result<T, ConfigError>;
 
+// Defaults are **relative**, so a config file dropped in a project folder makes
+// that folder self-contained: database, media and prompt in one directory you can
+// back up or copy to another machine intact. See `resolve_path` for what they are
+// resolved against.
 fn default_db_path() -> PathBuf {
-    PathBuf::from("~/.local/share/endlesslitrpg/story.db")
+    PathBuf::from("data/story.db")
 }
 fn default_media_dir() -> PathBuf {
-    PathBuf::from("~/.local/share/endlesslitrpg/media")
+    PathBuf::from("media")
 }
 fn default_story_dir() -> PathBuf {
-    PathBuf::from("~/.local/share/endlesslitrpg/story")
+    PathBuf::from("story")
 }
 fn default_ember_url() -> String {
     "http://familiar:8091".into()
@@ -188,6 +192,34 @@ pub fn expand_tilde(path: &Path) -> PathBuf {
     }
 }
 
+/// Resolve one configured path: expand `~`, then make it absolute against `base`.
+///
+/// # Relative means relative to the config file, not to the shell
+///
+/// `base` is the directory holding the config file. Resolving against the process
+/// CWD instead would make `litrpg status` describe a different database depending on
+/// which directory you happened to be standing in — precisely the class of surprise
+/// this crate exists to prevent. Relative-to-the-config-file also makes a project
+/// folder portable: copy the directory elsewhere and every path still points inside
+/// it.
+///
+/// Order matters. `expand_tilde` runs **first**, so `~/.local/share/...` still works
+/// for anyone who wants XDG-style layout; it becomes absolute and is then used
+/// verbatim. An already-absolute path is likewise never joined.
+pub fn resolve_path(path: &Path, base: &Path) -> PathBuf {
+    let expanded = expand_tilde(path);
+    if expanded.is_absolute() {
+        expanded
+    } else {
+        base.join(expanded)
+    }
+}
+
+/// The process working directory, used as the base when there is no config file.
+fn cwd() -> PathBuf {
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
 /// Pure resolution rule behind [`config_path`], split out so precedence is
 /// testable without mutating process environment — `set_var` is `unsafe` in
 /// edition 2024 and would race against parallel tests in the same binary.
@@ -217,7 +249,7 @@ impl Config {
             Some(p) => Self::load_from(&p),
             None => {
                 let mut c = Self::default();
-                c.expand_paths();
+                c.resolve_paths(&cwd());
                 c.validate()?;
                 Ok(c)
             }
@@ -226,13 +258,21 @@ impl Config {
 
     /// Load a specific file. A missing file yields validated defaults; a malformed
     /// one is an error.
+    ///
+    /// Relative paths resolve against `path`'s own directory when the file exists,
+    /// and against the process CWD when it does not — there is no config file to be
+    /// relative to in that case.
     pub fn load_from(path: &Path) -> Result<Self> {
-        let mut config = match std::fs::read_to_string(path) {
-            Ok(text) => toml::from_str::<Self>(&text).map_err(|source| ConfigError::Parse {
-                path: path.to_path_buf(),
-                source,
-            })?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::default(),
+        let (mut config, base) = match std::fs::read_to_string(path) {
+            Ok(text) => {
+                let parsed =
+                    toml::from_str::<Self>(&text).map_err(|source| ConfigError::Parse {
+                        path: path.to_path_buf(),
+                        source,
+                    })?;
+                (parsed, Self::base_for(path))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Self::default(), cwd()),
             Err(source) => {
                 return Err(ConfigError::Read {
                     path: path.to_path_buf(),
@@ -240,15 +280,26 @@ impl Config {
                 });
             }
         };
-        config.expand_paths();
+        config.resolve_paths(&base);
         config.validate()?;
         Ok(config)
     }
 
-    fn expand_paths(&mut self) {
-        self.db_path = expand_tilde(&self.db_path);
-        self.media_dir = expand_tilde(&self.media_dir);
-        self.story_dir = expand_tilde(&self.story_dir);
+    /// Directory that relative paths in `config_path` resolve against.
+    ///
+    /// A bare filename (`litrpg.toml`) has an empty parent, which would join to a
+    /// path relative to nothing; CWD is the correct base for it.
+    pub fn base_for(config_path: &Path) -> PathBuf {
+        match config_path.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+            _ => cwd(),
+        }
+    }
+
+    fn resolve_paths(&mut self, base: &Path) {
+        self.db_path = resolve_path(&self.db_path, base);
+        self.media_dir = resolve_path(&self.media_dir, base);
+        self.story_dir = resolve_path(&self.story_dir, base);
     }
 
     /// Reject configurations that would fail later in a harder-to-diagnose place.
@@ -328,17 +379,21 @@ pub const STARTER_CONFIG: &str = r#"# endless-litrpg configuration
 #
 # Loaded from $LITRPG_CONFIG if set, otherwise
 # ~/.config/endlesslitrpg/config.toml. Every key is optional — anything omitted
-# falls back to the built-in default shown here. A leading ~ is expanded.
+# falls back to the built-in default shown here.
+
+# Relative paths resolve against THIS FILE's directory, not the shell's working
+# directory — so this folder is self-contained and can be copied to another
+# machine intact. An absolute path, or one starting with ~, is used as given.
 
 # SQLite database. The only file that holds state; back this up.
-db_path = "~/.local/share/endlesslitrpg/story.db"
+db_path = "data/story.db"
 
 # Chapter artifacts: NNNN.md, NNNN.json, NNNN.mp3, NNNN.pcm (spec §8).
-media_dir = "~/.local/share/endlesslitrpg/media"
+media_dir = "media"
 
 # Holds prompt.md, the git-tracked story prompt. Reloaded at chapter
 # boundaries only, never mid-chapter (spec §9.3).
-story_dir = "~/.local/share/endlesslitrpg/story"
+story_dir = "story"
 
 # Ember, the local model that writes the prose.
 ember_url = "http://familiar:8091"

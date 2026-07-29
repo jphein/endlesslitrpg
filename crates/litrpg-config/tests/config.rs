@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use litrpg_config::{
     CONFIG_ENV, Config, ConfigError, DEFAULT_CONFIG_RELPATH, MIN_BUFFER_TARGET, STARTER_CONFIG,
-    expand_tilde, resolve_config_path,
+    expand_tilde, resolve_config_path, resolve_path,
 };
 use tempfile::TempDir;
 
@@ -39,16 +39,19 @@ fn defaults_match_the_spec() {
     assert_eq!(c.buffer_target, 3);
     assert_eq!(c.target_words, 2000);
     assert_eq!(c.narrator_voice, "sherpa:piper-en_GB-cori-high:0");
+    // Relative on purpose: a project folder should be self-contained.
+    assert_eq!(c.db_path, PathBuf::from("data/story.db"));
+    assert_eq!(c.media_dir, PathBuf::from("media"));
+    assert_eq!(c.story_dir, PathBuf::from("story"));
 }
 
 #[test]
 fn defaults_are_valid() {
     // Whatever the defaults are, they must survive our own validation gate —
     // otherwise `load()` on a machine with no config file cannot succeed.
-    let mut c = Config::default();
-    c.db_path = expand_tilde(&c.db_path);
-    c.media_dir = expand_tilde(&c.media_dir);
-    c.story_dir = expand_tilde(&c.story_dir);
+    // Defaults are relative now, so resolve them the way `load` does.
+    let dir = tmp();
+    let c = Config::load_from(&dir.path().join("absent.toml")).unwrap();
     c.validate().unwrap();
 }
 
@@ -166,10 +169,13 @@ story_dir = "~/litrpg/story"
 "#,
     );
     let c = Config::load_from(&path).unwrap();
+    // Expanded to an absolute path and then used verbatim — NOT joined onto the
+    // config file's directory, which would produce /tmp/.../home/jp/litrpg/...
     assert_eq!(c.db_path, home().join("litrpg/story.db"));
     assert_eq!(c.media_dir, home().join("litrpg/media"));
     assert_eq!(c.story_dir, home().join("litrpg/story"));
     assert!(!c.db_path.to_str().unwrap().contains('~'));
+    assert!(!c.db_path.starts_with(dir.path()));
 }
 
 #[test]
@@ -440,11 +446,13 @@ fn the_starter_file_loads_and_equals_the_defaults() {
     Config::write_default_if_absent(&path).unwrap();
 
     let loaded = Config::load_from(&path).unwrap();
-    let mut expected = Config::default();
-    expected.db_path = expand_tilde(&expected.db_path);
-    expected.media_dir = expand_tilde(&expected.media_dir);
-    expected.story_dir = expand_tilde(&expected.story_dir);
-
+    let base = dir.path();
+    let expected = Config {
+        db_path: base.join("data/story.db"),
+        media_dir: base.join("media"),
+        story_dir: base.join("story"),
+        ..Default::default()
+    };
     assert_eq!(loaded, expected);
 }
 
@@ -452,4 +460,137 @@ fn the_starter_file_loads_and_equals_the_defaults() {
 fn the_starter_constant_parses_on_its_own() {
     let parsed: Config = toml::from_str(STARTER_CONFIG).unwrap();
     assert_eq!(parsed.buffer_target, 3);
+}
+
+// ------------------------------------------------ project-relative paths
+
+#[test]
+fn relative_paths_resolve_against_the_config_files_directory() {
+    // The portability property: this folder is self-contained, so copying it to
+    // another machine keeps every path pointing inside it.
+    let dir = tmp();
+    let path = dir.path().join("litrpg.toml");
+    write(
+        &path,
+        "db_path = \"data/story.db\"\nmedia_dir = \"media\"\nstory_dir = \"story\"\n",
+    );
+
+    let c = Config::load_from(&path).unwrap();
+    assert_eq!(c.db_path, dir.path().join("data/story.db"));
+    assert_eq!(c.media_dir, dir.path().join("media"));
+    assert_eq!(c.story_dir, dir.path().join("story"));
+    assert_eq!(c.prompt_path(), dir.path().join("story/prompt.md"));
+}
+
+#[test]
+fn a_config_in_a_nested_directory_resolves_against_that_directory() {
+    let dir = tmp();
+    let nested = dir.path().join("a/b");
+    std::fs::create_dir_all(&nested).unwrap();
+    let path = nested.join("litrpg.toml");
+    write(&path, "db_path = \"data/story.db\"\n");
+    assert_eq!(
+        Config::load_from(&path).unwrap().db_path,
+        nested.join("data/story.db")
+    );
+}
+
+#[test]
+fn an_absolute_path_is_used_verbatim_and_never_joined() {
+    let dir = tmp();
+    let path = dir.path().join("litrpg.toml");
+    write(
+        &path,
+        "db_path = \"/srv/litrpg/story.db\"\nmedia_dir = \"/srv/litrpg/media\"\nstory_dir = \"/srv/litrpg/story\"\n",
+    );
+    let c = Config::load_from(&path).unwrap();
+    assert_eq!(c.db_path, PathBuf::from("/srv/litrpg/story.db"));
+    assert_eq!(c.media_dir, PathBuf::from("/srv/litrpg/media"));
+    assert_eq!(c.story_dir, PathBuf::from("/srv/litrpg/story"));
+    assert!(!c.db_path.starts_with(dir.path()));
+}
+
+#[test]
+fn absolute_and_relative_can_be_mixed_in_one_file() {
+    // Media on a big disk, database beside the config. Both must work together.
+    let dir = tmp();
+    let path = dir.path().join("litrpg.toml");
+    write(
+        &path,
+        "db_path = \"data/story.db\"\nmedia_dir = \"/srv/bulk/media\"\n",
+    );
+    let c = Config::load_from(&path).unwrap();
+    assert_eq!(c.db_path, dir.path().join("data/story.db"));
+    assert_eq!(c.media_dir, PathBuf::from("/srv/bulk/media"));
+}
+
+#[test]
+fn with_no_config_file_relative_defaults_resolve_against_the_cwd() {
+    let dir = tmp();
+    let c = Config::load_from(&dir.path().join("absent.toml")).unwrap();
+    let here = std::env::current_dir().unwrap();
+    assert_eq!(c.db_path, here.join("data/story.db"));
+    assert_eq!(c.story_dir, here.join("story"));
+    // Not the missing file's directory: there is no config file to be relative to.
+    assert!(!c.db_path.starts_with(dir.path()));
+}
+
+#[test]
+fn resolve_path_expands_tilde_before_deciding_absoluteness() {
+    // Order matters: if `base.join` ran first, `~/x` would become `<base>/~/x`.
+    let base = PathBuf::from("/srv/project");
+    assert_eq!(resolve_path(Path::new("~/x"), &base), home().join("x"));
+    assert_eq!(
+        resolve_path(Path::new("data/story.db"), &base),
+        PathBuf::from("/srv/project/data/story.db")
+    );
+    assert_eq!(
+        resolve_path(Path::new("/abs/story.db"), &base),
+        PathBuf::from("/abs/story.db")
+    );
+}
+
+#[test]
+fn resolve_path_leaves_a_non_home_tilde_relative() {
+    // `~user/x` is a legal relative filename, so it joins rather than expanding.
+    let base = PathBuf::from("/srv/project");
+    assert_eq!(
+        resolve_path(Path::new("~user/x"), &base),
+        PathBuf::from("/srv/project/~user/x")
+    );
+}
+
+#[test]
+fn a_bare_config_filename_resolves_against_the_cwd() {
+    // `Path::new("litrpg.toml").parent()` is `Some("")`, which would join to
+    // nothing useful.
+    let here = std::env::current_dir().unwrap();
+    assert_eq!(Config::base_for(Path::new("litrpg.toml")), here);
+    assert_eq!(
+        Config::base_for(Path::new("/srv/p/litrpg.toml")),
+        PathBuf::from("/srv/p")
+    );
+}
+
+#[test]
+fn a_project_folder_survives_being_moved() {
+    // Write a config, load it, move the whole directory, load again: every path
+    // must now point inside the new location.
+    let first = tmp();
+    let path = first.path().join("litrpg.toml");
+    Config::write_default_if_absent(&path).unwrap();
+    let before = Config::load_from(&path).unwrap();
+    assert!(before.db_path.starts_with(first.path()));
+
+    let second = tmp();
+    let moved = second.path().join("relocated");
+    std::fs::create_dir_all(&moved).unwrap();
+    let moved_cfg = moved.join("litrpg.toml");
+    std::fs::copy(&path, &moved_cfg).unwrap();
+
+    let after = Config::load_from(&moved_cfg).unwrap();
+    assert_eq!(after.db_path, moved.join("data/story.db"));
+    assert_eq!(after.media_dir, moved.join("media"));
+    assert_eq!(after.story_dir, moved.join("story"));
+    assert_ne!(after.db_path, before.db_path);
 }

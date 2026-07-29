@@ -305,8 +305,8 @@ async fn run(args: Args) -> Result<ExitCode, Box<dyn std::error::Error>> {
 /// daemon down mid-chapter rather than degrading.
 #[cfg(feature = "sherpa")]
 fn register_sherpa(registry: &mut TtsRegistry) {
-    use litrpg_tts::sherpa::SherpaConfig;
     use litrpg_tts::sherpa::SherpaBackend;
+    use litrpg_tts::sherpa::SherpaConfig;
 
     let cfg = SherpaConfig::default();
     let broken = cfg.preflight();

@@ -126,7 +126,9 @@ async fn a_failure_to_write_the_markdown_does_not_cost_the_chapter() {
         FakeArtifacts::failing_on("text"),
     );
     match e.run_cycle(0).await.unwrap() {
-        CycleOutcome::Produced { chapter, has_audio, .. } => {
+        CycleOutcome::Produced {
+            chapter, has_audio, ..
+        } => {
             assert_eq!(chapter, 1);
             assert!(has_audio, "the audio path is independent of the markdown");
         }

@@ -1436,9 +1436,11 @@ CREATE TABLE lore (
     updated_chapter INTEGER NOT NULL DEFAULT 0
 );
 
+-- `chapter` is the chapter *number*, which is UNIQUE in chapters. There is
+-- deliberately no chapter_id FK: a rewind must be able to deactivate ledger rows
+-- for chapters that have since been deleted.
 CREATE TABLE ledger (
     id         INTEGER PRIMARY KEY,
-    chapter_id INTEGER,
     chapter    INTEGER NOT NULL,
     seq        INTEGER NOT NULL UNIQUE,
     subject    TEXT    NOT NULL,
@@ -1783,11 +1785,16 @@ impl Store {
         Ok(())
     }
 
-    /// Cast speakers ∪ existing ledger subjects ∪ lore entries of kind `character`.
+    /// Cast speakers ∪ **applied** ledger subjects ∪ lore entries of kind `character`.
+    ///
+    /// The `applied = 1` filter is load-bearing, not decorative. Rejections are
+    /// stored with `applied = 0`, so without it a typo'd subject would be rejected
+    /// once, thereby enter the known set, and be **accepted** on the second
+    /// identical attempt — the gate teaching itself the ghost it just caught.
     pub fn known_subjects(&self) -> Result<BTreeSet<String>> {
         let mut stmt = self.conn.prepare(
             "SELECT speaker FROM cast
-             UNION SELECT subject FROM ledger
+             UNION SELECT subject FROM ledger WHERE applied = 1
              UNION SELECT name FROM lore WHERE kind = 'character'",
         )?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;

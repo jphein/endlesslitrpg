@@ -1,0 +1,25 @@
+[package]
+name = "litrpg-daemon"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "HTTP surface for endless-litrpg: chapter API, Range-capable PCM, RSS feed, realm-sigil version"
+
+[lib]
+name = "litrpg_daemon"
+path = "src/lib.rs"
+
+[[bin]]
+name = "litrpg-daemon"
+path = "src/main.rs"
+
+[dependencies]
+litrpg-core = { workspace = true }
+litrpg-store = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+tower-http = { workspace = true, features = ["fs", "trace"] }
+serde = { workspace = true, features = ["std"] }
+serde_json = { workspace = true, features = ["std"] }
+thiserror = { workspace = true }

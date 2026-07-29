@@ -4,6 +4,7 @@ members = [
     "crates/litrpg-store",
     "crates/litrpg-ember",
     "crates/litrpg-tts",
+    "crates/litrpg-daemon",
 ]
 resolver = "3"
 
@@ -42,3 +43,4 @@ litrpg-core = { path = "crates/litrpg-core" }
 litrpg-store = { path = "crates/litrpg-store" }
 litrpg-ember = { path = "crates/litrpg-ember" }
 litrpg-tts = { path = "crates/litrpg-tts" }
+litrpg-daemon = { path = "crates/litrpg-daemon" }

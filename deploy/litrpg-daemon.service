@@ -5,16 +5,27 @@
 #   sudo systemctl daemon-reload && sudo systemctl enable --now litrpg-daemon
 #   curl -s http://localhost:8093/api/version | jq
 #
-# Plain HTTP, no TLS, no DNS — the ESP32-C6 watch supports none of those, so it
-# reaches this at a literal 10.0.6.129:8093, which is katana on the admin VLAN and
-# matches LITRPG_BASE_URL below. (The spec's §9.1 says 10.0.6.107/familiar, which is
-# where the daemon was *designed* to run per D4 — it is on katana today, and nothing
-# answers on .107.)
+# Plain HTTP, no TLS. The watch client does no name resolution today, so it reaches
+# this at a literal 10.0.6.129:8093 — katana, matching LITRPG_BASE_URL below. (The
+# spec's §9.1 says 10.0.6.107, which is familiar, where the daemon was *designed* to
+# run per D4. It is on katana today, so nothing answers on .107 — the address is
+# right and the host moved.)
 #
-# That address still needs a pinned DHCP lease and does not have one: the interface
-# reports `10.0.6.129/24 dynamic`. The watch cannot resolve a name, so if the lease
-# moves, every client breaks with no error anywhere — the daemon keeps serving
-# happily on an address nobody is asking any more.
+# The lease IS pinned, checked on gatekeeper rather than inferred:
+#
+#   dhcp.@host[22].name='katana'    ip='10.0.6.129' mac='00:D8:61:BB:9F:8E' dns='1'
+#   dhcp.@host[103].name='familiar' ip='10.0.6.107' mac='04:d9:f5:fa:1e:e0' dns='1'
+#
+# An earlier version of this comment claimed there was no reservation, reasoning from
+# `ip addr` reporting `10.0.6.129/24 dynamic`. That word means only "obtained via
+# DHCP", which is exactly what a MAC reservation looks like from the client — the
+# client cannot distinguish reserved from unreserved, and only the server knows. Do
+# not re-derive this from the client side.
+#
+# `dns='1'` also means dnsmasq already resolves these: `katana.lan` -> 10.0.6.129
+# answers on the LAN today. So the *server* half of using a name is done, and a
+# resolver on the watch — a few KB — would let it survive any future address change
+# without new infrastructure and without needing story.jphe.in to exist.
 
 [Unit]
 Description=endless-litrpg — HTTP surface

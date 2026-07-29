@@ -23,6 +23,9 @@ fn all_expected_tables_exist() {
             "notes",
             "segments",
             "story",
+            // Added by migration 007: one character recorded under two names, resolved at
+            // read time so the append-only ledger is never rewritten (#11).
+            "subject_alias",
             "summaries",
         ]
     );

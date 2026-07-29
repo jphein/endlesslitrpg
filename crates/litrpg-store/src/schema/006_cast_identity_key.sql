@@ -1,0 +1,44 @@
+-- One owner for "are these two speaker names the same person".
+--
+-- `cast.speaker TEXT NOT NULL UNIQUE` is a **binary** constraint in SQLite, while every
+-- reader compares speakers case-insensitively. So writes treated `Kaelen` and `kaelen` as
+-- two characters and reads treated them as one, and which voice the character actually got
+-- was decided by `ORDER BY first_chapter, speaker` rather than by intent. Demonstrated
+-- through the store's own public API before this migration was written:
+--
+--     cast rows for one character: 2
+--       "Kaelen" -> sherpa:voice-A:0
+--       "kaelen" -> sherpa:voice-B:0
+--     eq_ignore_ascii_case picks: "Kaelen" -> sherpa:voice-A:0
+--
+-- The fix is a stored `identity_key`, written by `upsert_cast` from
+-- `litrpg_core::speaker::identity_key`, with the uniqueness constraint on **that**. SQL then
+-- indexes the rule's output instead of reimplementing it. `COLLATE NOCASE` was the cheaper
+-- option and was rejected: it is the same rule expressed a second time in another language,
+-- and it cannot express whitespace collapsing at all.
+--
+-- # The column is added here; the values and the index are not
+--
+-- Backfilling requires calling `identity_key`, which is Rust. Writing `lower(trim(speaker))`
+-- here would be rule number eight — agreeing with the owner today and free to drift
+-- tomorrow. So this file adds the column only, and `Store::migrate` runs a Rust step
+-- (`backfill_cast_identity_keys`) that fills it and *then* creates the unique index, because
+-- the index cannot be created before the values exist.
+--
+-- # If this migration fails
+--
+-- The Rust step's `CREATE UNIQUE INDEX` fails when the database already holds two cast rows
+-- that are one person. SQLite reports only "UNIQUE constraint failed", which names nothing,
+-- so the offenders are found with:
+--
+--     SELECT lower(replace(replace(trim(speaker), char(9), ' '), '  ', ' ')) AS k,
+--            group_concat(speaker, ' | ') AS rows, count(*) AS n
+--     FROM cast GROUP BY k HAVING n > 1;
+--
+-- (that query approximates `identity_key` for *diagnosis only* — never for enforcement.)
+--
+-- Resolve by deciding which voice the character should have, deleting the other row, and
+-- re-running. Failing loudly is correct: skipping the constraint would leave the rule
+-- unenforced with nobody knowing, which is the disease this migration treats.
+
+ALTER TABLE cast ADD COLUMN identity_key TEXT NOT NULL DEFAULT '';

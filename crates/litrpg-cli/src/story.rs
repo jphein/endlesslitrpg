@@ -57,6 +57,9 @@ pub struct StoryReport {
     /// prompt/protagonist mismatch should say so immediately rather than leaving it for
     /// the next `status`.
     pub protagonist_check: ProtagonistCheck,
+    /// Re-checked after a `--protagonist` change for the same reason as the prompt check: a
+    /// command that can create the mismatch should say so at once.
+    pub protagonist_cast: naming::ProtagonistCast,
 }
 
 impl StoryReport {
@@ -127,6 +130,7 @@ pub fn story(store: &Store, edit: &StoryEdit, story_dir: &std::path::Path) -> Re
         &litrpg_config::resolve_path(std::path::Path::new(&after.prompt_path), story_dir),
     )?;
 
+    let protagonist_cast = naming::check_protagonist_cast_in(store)?;
     Ok(StoryReport {
         title: after.title,
         protagonist: after.protagonist,
@@ -136,6 +140,7 @@ pub fn story(store: &Store, edit: &StoryEdit, story_dir: &std::path::Path) -> Re
         prompt_hash: after.prompt_hash,
         changes,
         protagonist_check,
+        protagonist_cast,
     })
 }
 
@@ -171,6 +176,10 @@ pub fn render_text(r: &StoryReport) -> String {
     out.push_str(&format!("  prompt hash       {}\n", r.prompt_hash));
 
     if let Some(w) = naming::warning(&r.protagonist_check, &r.protagonist) {
+        out.push('\n');
+        out.push_str(&w);
+    }
+    if let Some(w) = naming::cast_warning(&r.protagonist_cast, &r.protagonist) {
         out.push('\n');
         out.push_str(&w);
     }

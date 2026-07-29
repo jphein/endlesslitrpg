@@ -219,6 +219,107 @@ pub fn warning(check: &ProtagonistCheck, protagonist: &str) -> Option<String> {
     }
 }
 
+/// Whether `story.protagonist` corresponds to a cast member.
+///
+/// # Why this exists, and why it fires earlier than everything else
+///
+/// The live story had `story.protagonist = "Kaelen Vord"` while the cast row said `Kaelen`.
+/// Both became legitimately known subjects — the protagonist seeds one, the cast row seeds the
+/// other — so pass 2 addressed deltas to whichever the context offered, and the protagonist's
+/// sheet split in two with chapter 3's stat changes invisible on it.
+///
+/// Nothing was watching that pair. `check_protagonist` compares the protagonist against the
+/// *prompt*, which agreed. `possible_aliases` needs both names present in the fold, so it can
+/// only report a split that has already happened. **This condition is true from the moment
+/// `init` runs**, before a single delta exists.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "result")]
+pub enum ProtagonistCast {
+    /// No protagonist recorded, so there is nothing to compare.
+    Unset,
+    /// No cast rows at all — a story that has not been written yet, not a mismatch.
+    CastEmpty,
+    /// Corresponds to a cast member, directly or through an alias.
+    Cast { speaker: String },
+    /// Names no cast member. Their stat changes will land under a name with no voice.
+    Missing { cast: Vec<String> },
+}
+
+impl ProtagonistCast {
+    pub fn is_warning(&self) -> bool {
+        matches!(self, Self::Missing { .. })
+    }
+}
+
+/// Compare a protagonist against cast speakers. Pure; the caller resolves aliases first.
+///
+/// **`resolved_cast` must already have been through alias resolution**, and so must
+/// `protagonist`. Once an alias maps `Kaelen -> Kaelen Vord` the two sides agree and this goes
+/// quiet — which is the point. A warning that survives its own fix is one people learn to
+/// ignore, and JP chose the alias mapping precisely as the fix.
+pub fn check_protagonist_cast(protagonist: &str, resolved_cast: &[String]) -> ProtagonistCast {
+    let name = protagonist.trim();
+    if name.is_empty() {
+        return ProtagonistCast::Unset;
+    }
+    // Roles are not people and never appear as the protagonist's cast row, so they do not
+    // count towards the cast being non-empty for this purpose.
+    let people: Vec<&String> = resolved_cast
+        .iter()
+        .filter(|s| !litrpg_core::speaker::is_reserved(s))
+        .collect();
+    if people.is_empty() {
+        return ProtagonistCast::CastEmpty;
+    }
+    match people
+        .iter()
+        .find(|s| litrpg_core::speaker::same_speaker(s, name))
+    {
+        Some(s) => ProtagonistCast::Cast {
+            speaker: (*s).clone(),
+        },
+        None => ProtagonistCast::Missing {
+            cast: people.iter().map(|s| (*s).clone()).collect(),
+        },
+    }
+}
+
+/// Run the check against a store, resolving both sides through the alias table first.
+///
+/// Both sides, not just one: in the live shape the *cast* name is the alias
+/// (`Kaelen -> Kaelen Vord`) while the protagonist is already canonical, so resolving only the
+/// protagonist would leave them looking mismatched forever.
+pub fn check_protagonist_cast_in(store: &litrpg_store::Store) -> Result<ProtagonistCast> {
+    let Some(row) = store.story()? else {
+        return Ok(ProtagonistCast::Unset);
+    };
+    let protagonist = store.resolve_subject(&row.protagonist)?;
+    let mut resolved = Vec::new();
+    for c in store.cast()? {
+        resolved.push(store.resolve_subject(&c.speaker)?);
+    }
+    Ok(check_protagonist_cast(&protagonist, &resolved))
+}
+
+/// The warning for a protagonist who names no cast member.
+pub fn cast_warning(check: &ProtagonistCast, protagonist: &str) -> Option<String> {
+    match check {
+        ProtagonistCast::Unset | ProtagonistCast::CastEmpty | ProtagonistCast::Cast { .. } => None,
+        ProtagonistCast::Missing { cast } => Some(format!(
+            "!! The protagonist {protagonist:?} is not in the cast, which lists {}.\n\
+             !! Both names become known subjects — the protagonist seeds one, each cast row\n\
+             !! seeds another — so stat changes land under whichever the model happens to use\n\
+             !! and the character's sheet splits in two. The ledger is append-only, so that\n\
+             !! cannot be merged after the fact; it can only be prevented or aliased.\n\
+             !! Make them the same name, or record an alias.\n",
+            cast.iter()
+                .map(|c| format!("{c:?}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
 /// Subject pairs where one name is a whole-word prefix of the other, suggesting one
 /// character recorded under two identities.
 ///
@@ -227,6 +328,10 @@ pub fn warning(check: &ProtagonistCheck, protagonist: &str) -> Option<String> {
 /// occasionally flag two genuinely distinct characters (`Vessa` and `Vessa the Elder`),
 /// which is why the report says "may be" and suggests nothing destructive.
 pub fn possible_aliases(subjects: &[String]) -> Vec<(String, String)> {
+    // Note: this is a *different* question from `core::same_speaker`. That answers "are these
+    // spellings the same name"; this asks "is one name a prefix of another", which is a guess
+    // about two different names denoting one person. `identity_key` already merged the former,
+    // so anything reaching here is genuinely two names.
     let mut pairs = Vec::new();
     for (i, a) in subjects.iter().enumerate() {
         for b in subjects.iter().skip(i + 1) {

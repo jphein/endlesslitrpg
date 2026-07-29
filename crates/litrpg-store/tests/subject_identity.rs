@@ -73,19 +73,41 @@ fn the_gate_rejects_stats_for_the_system_voice() {
     assert!(s.snapshot().unwrap().num("SYSTEM", "xp").is_none());
 }
 
-/// The `EXCEPT` clause, not just the filtered union. A database that already accrued
-/// rows under `SYSTEM` before the fix must not keep readmitting it through the ledger
-/// union — which is precisely the state the live run left behind.
+/// `upsert_cast` now refuses to create the pollution the next test defends against, so the
+/// hole is closed at the write boundary. Asserted here so the two cannot drift apart: if this
+/// guard is ever removed, this test fails rather than the one below silently becoming
+/// reachable-by-API again.
+#[test]
+fn a_reserved_name_cannot_be_cast_as_a_character() {
+    let s = Store::open_in_memory().unwrap();
+    let err = s
+        .upsert_cast("SYSTEM", "azure:en-US-Steffan", "character", 1)
+        .unwrap_err();
+    assert!(err.to_string().contains("SYSTEM"), "{err}");
+    assert!(
+        s.cast().unwrap().is_empty(),
+        "nothing should have been written"
+    );
+}
+
+/// The `EXCEPT` clause, not just the filtered union. A database that already accrued rows
+/// under `SYSTEM` before the fix must not keep readmitting it through the ledger union —
+/// which is precisely the state the live run left behind.
 #[test]
 fn a_database_already_polluted_with_system_rows_stops_accepting_more() {
     let s = Store::open_in_memory().unwrap();
-    // Pollute first, while SYSTEM is still an unknown subject to nobody's benefit:
-    // insert it as a *character* so the delta is accepted, then reclassify.
-    s.upsert_cast(
-        "SYSTEM",
-        "azure:en-US-Steffan:DragonHDLatestNeural",
-        "character",
-        1,
+    // The pollution is injected out-of-band, because `upsert_cast` now refuses it — see the
+    // test above. That refusal is the primary defence; this one is the read-side gate that
+    // still has to hold for rows written *before* the guard existed, or by a hand edit. A
+    // migration cannot retroactively clean them, so the gate cannot be retired.
+    //
+    // This is §5.5's rule meeting a guard that makes the broken state unreachable: a
+    // recovery path must be tested from the broken state, so when the API stops being able
+    // to produce it, the test constructs it directly. `raw_execute_for_tests` exists for
+    // exactly this and its doc comment says so.
+    s.raw_execute_for_tests(
+        "INSERT INTO cast (speaker, voice_ref, kind, first_chapter, identity_key)
+         VALUES ('SYSTEM', 'azure:en-US-Steffan', 'character', 1, 'system')",
     )
     .unwrap();
     s.append_delta(1, &delta("SYSTEM", "xp", 150))

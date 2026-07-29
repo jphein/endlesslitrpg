@@ -129,21 +129,21 @@ pub struct VoiceDivergence {
 /// precisely the case `replan_from_store` leaves alone, warning and keeping the stored
 /// voice. So what this reports is exactly the set a re-render will change.
 ///
-/// Speaker matching is **case-insensitive, to match the engine**. `replan_from_store` uses
-/// `eq_ignore_ascii_case`, so an exact-match lookup here would silently omit a segment
-/// spelled `SYSTEM` against a cast row spelled `system` — reporting "nothing will change"
-/// about a segment that will. Two places comparing the same names by different rules is the
-/// duplication that keeps biting; this one is now aligned deliberately.
+/// Speaker matching goes through `litrpg_core::speaker::identity_key`, the one owner (#14).
+/// It used to be exact equality here while the engine used `eq_ignore_ascii_case`, so a
+/// segment spelled `SYSTEM` against a cast row spelled `system` reported "nothing will change"
+/// about a segment that would. Aligning by hand fixed that instance and left the rule
+/// duplicated; asking core removes the class.
 pub fn voice_divergence(store: &Store, chapter: u32) -> Result<Vec<VoiceDivergence>> {
     let cast: BTreeMap<String, String> = store
         .cast()?
         .into_iter()
-        .map(|c| (c.speaker.to_lowercase(), c.voice_ref))
+        .map(|c| (litrpg_core::speaker::identity_key(&c.speaker), c.voice_ref))
         .collect();
 
     let mut out: Vec<VoiceDivergence> = Vec::new();
     for seg in store.segments(chapter)? {
-        let Some(want) = cast.get(&seg.speaker.to_lowercase()) else {
+        let Some(want) = cast.get(&litrpg_core::speaker::identity_key(&seg.speaker)) else {
             continue;
         };
         if *want == seg.voice_ref {
@@ -182,7 +182,9 @@ fn last_rendered_voices(
         scanned.push(*number);
         for seg in store.segments(*number)? {
             // Newest-first iteration, so the first value wins.
-            seen.entry(seg.speaker).or_insert(seg.voice_ref);
+            // Keyed by identity, so `SYSTEM` and `system` are one speaker here too.
+            seen.entry(litrpg_core::speaker::identity_key(&seg.speaker))
+                .or_insert(seg.voice_ref);
         }
     }
     Ok((seen, scanned))
@@ -195,7 +197,7 @@ pub fn list(store: &Store) -> Result<CastListing> {
         .into_iter()
         .map(|c| {
             let rendered_as = rendered_voices
-                .get(&c.speaker)
+                .get(&litrpg_core::speaker::identity_key(&c.speaker))
                 .filter(|used| **used != c.voice_ref)
                 .cloned();
             CastEntry {

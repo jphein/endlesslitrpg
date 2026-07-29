@@ -65,10 +65,20 @@ impl Store {
         kind: &str,
         first_chapter: u32,
     ) -> Result<()> {
+        // `identity_key` is what `cast_identity_key_idx` enforces uniqueness on, so the
+        // conflict target is that rather than `speaker`: `Kaelen` and `kaelen` are one
+        // character and must update one row, not create a second with a second voice.
+        // Written from `litrpg_core::speaker`, never recomputed here.
+        let speaker = litrpg_core::speaker::canonical(speaker);
+        let key = litrpg_core::speaker::identity_key(&speaker);
+
+        Self::check_kind_against_name(&speaker, kind)?;
+
         self.conn.execute(
-            "INSERT INTO cast (speaker, voice_ref, kind, first_chapter) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(speaker) DO UPDATE SET voice_ref = excluded.voice_ref",
-            params![speaker, voice_ref, kind, first_chapter],
+            "INSERT INTO cast (speaker, voice_ref, kind, first_chapter, identity_key)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(identity_key) DO UPDATE SET voice_ref = excluded.voice_ref",
+            params![speaker, voice_ref, kind, first_chapter, key],
         )?;
         Ok(())
     }
@@ -79,14 +89,87 @@ impl Store {
     /// `first_chapter` as provenance. Reclassification changes who the gate will accept
     /// stats for (see [`Store::known_subjects`]), so it is an explicit act rather than a
     /// side effect of assigning a voice. Errors if the speaker is not in the cast.
+    /// Reclassify a cast member.
+    ///
+    /// Two things were wrong here and both were silent.
+    ///
+    /// `WHERE speaker = ?1` was an exact match — rule number eight. Since 006 the stored
+    /// spelling is `canonical`, so `set_cast_kind("system", ..)` against the row stored as
+    /// `SYSTEM` found nothing and returned `UnknownSpeaker` for a speaker that plainly exists.
+    /// Matching on `identity_key` asks the owner instead.
+    ///
+    /// And it was an unguarded door onto the hole `upsert_cast` closes: `set_cast_kind("SYSTEM",
+    /// "character")` would have made a voice into a person again, which is exactly the state
+    /// that put a whole stat block under `subject: "SYSTEM"`. The same check applies here.
     pub fn set_cast_kind(&self, speaker: &str, kind: &str) -> Result<()> {
+        let canonical = litrpg_core::speaker::canonical(speaker);
+        Self::check_kind_against_name(&canonical, kind)?;
         let n = self.conn.execute(
-            "UPDATE cast SET kind = ?2 WHERE speaker = ?1",
-            params![speaker, kind],
+            "UPDATE cast SET kind = ?2 WHERE identity_key = ?1",
+            params![litrpg_core::speaker::identity_key(&canonical), kind],
         )?;
         if n == 0 {
             return Err(StoreError::UnknownSpeaker(speaker.to_string()));
         }
+        Ok(())
+    }
+
+    /// Refuse a name/kind pairing that would move a row across the person boundary.
+    ///
+    /// `is_reserved` answers "is this name a role"; `kind` answers "can this row hold stats".
+    /// They are different questions with different failure modes, and each has been masking the
+    /// other's blind spot: a character named `System` is a false positive for the name rule and
+    /// correctly handled by kind, while a narrator whose row was created with `--kind character`
+    /// is a false negative for kind and only caught by name. Closing the mismatch lets `kind` be
+    /// the sole authority on personhood without a gap.
+    ///
+    /// Both directions, because both are silent: one turns a voice into a character who accrues
+    /// stats, the other stops a real character's stat changes being accepted.
+    fn check_kind_against_name(canonical: &str, kind: &str) -> Result<()> {
+        let reserved_name = litrpg_core::speaker::is_reserved(canonical);
+        let role_kind = matches!(kind, "narrator" | "system");
+        if reserved_name && !role_kind {
+            return Err(StoreError::ReservedKindMismatch {
+                speaker: canonical.to_string(),
+                kind: kind.to_string(),
+            });
+        }
+        if !reserved_name && role_kind {
+            return Err(StoreError::PersonGivenRoleKind {
+                speaker: canonical.to_string(),
+                kind: kind.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Insert a cast row **without** the name/kind guard, to simulate a database written
+    /// before the guard existed.
+    ///
+    /// Not part of the supported surface. It exists because the guard makes the polluted state
+    /// unreachable through the API, and the property that a *already*-polluted database stops
+    /// accepting new deltas still has to be tested — the live run left exactly that state
+    /// behind, and the `EXCEPT` clause is what handles it.
+    #[doc(hidden)]
+    pub fn insert_unguarded_cast_row_for_test(
+        &self,
+        speaker: &str,
+        voice_ref: &str,
+        kind: &str,
+        first_chapter: u32,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO cast (speaker, voice_ref, kind, first_chapter, identity_key)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(identity_key) DO UPDATE SET kind = excluded.kind",
+            params![
+                speaker,
+                voice_ref,
+                kind,
+                first_chapter,
+                litrpg_core::speaker::identity_key(speaker)
+            ],
+        )?;
         Ok(())
     }
 
@@ -167,7 +250,17 @@ impl Store {
              EXCEPT SELECT speaker FROM cast WHERE kind IN ('narrator', 'system')",
         )?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
-        Ok(rows.collect::<rusqlite::Result<BTreeSet<_>>>()?)
+        let raw: Vec<String> = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+
+        // Canonical names only. Offering both `Kaelen` and `Kaelen Vord` to pass 2 would
+        // invite the model to keep using the alias and keep the split alive; `append_delta`
+        // resolves an incoming alias before checking membership, so accepting one costs
+        // nothing here.
+        let aliases = self.alias_map()?;
+        Ok(raw
+            .into_iter()
+            .map(|s| crate::alias::resolve_with(&aliases, &s))
+            .collect())
     }
 
     /// Load every ledger row, plus anomalies for rows that could not be decoded.
@@ -194,6 +287,10 @@ impl Store {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
+        // Loaded once, not per row: resolving thousands of ledger rows with a query each
+        // would turn the fold into O(rows) round-trips.
+        let aliases = self.alias_map()?;
+
         let mut entries = Vec::with_capacity(raw.len());
         let mut anomalies = Vec::new();
         for (seq, chapter, subject, field, op, value_num, value_txt, applied) in raw {
@@ -203,6 +300,11 @@ impl Store {
                 ));
                 continue;
             };
+            // Alias resolution happens here, on the way *out* of the database. The row keeps
+            // the name it was written with (#11) and the fold attributes it to the canonical
+            // subject, so a character split across two names has one sheet without history
+            // being rewritten.
+            let subject = crate::alias::resolve_with(&aliases, &subject);
             entries.push(LedgerEntry {
                 seq: seq as u64,
                 chapter: chapter as u32,
@@ -220,6 +322,10 @@ impl Store {
     /// The derived state snapshot. Decode anomalies are merged into the fold's own
     /// `anomalies` channel, so an undecodable row surfaces to the operator instead
     /// of vanishing.
+    /// Fold the ledger, resolving aliases at read time.
+    ///
+    /// The rows are never rewritten (#11): append-only is what makes `rewind N` free, so a
+    /// character recorded under two names is merged *here* rather than in history.
     pub fn snapshot(&self) -> Result<StateSnapshot> {
         let (entries, mut decode_anomalies) = self.entries()?;
         let mut snap = fold(&entries);
@@ -246,7 +352,22 @@ impl Store {
     ) -> Result<core::result::Result<(), Rejection>> {
         let snapshot = self.snapshot()?;
         let known = self.known_subjects()?;
-        let verdict = validate_delta(&snapshot, &known, d);
+
+        // Validate against the *resolved* subject, store the name as given.
+        //
+        // Without this, a delta addressed to an alias clamps against a subject the snapshot
+        // has nothing for: `hp -5` on `Kaelen` would compute `0 - 5` and be rejected as
+        // HpBelowZero while `Kaelen Vord` sits at 63. The row keeps the model's spelling for
+        // audit; only the judgement uses the canonical identity.
+        let resolved_subject = self.resolve_subject(&d.subject)?;
+        let resolved = Delta {
+            subject: resolved_subject,
+            field: d.field.clone(),
+            op: d.op,
+            value_num: d.value_num,
+            value_txt: d.value_txt.clone(),
+        };
+        let verdict = validate_delta(&snapshot, &known, &resolved);
 
         let (applied, reason) = match &verdict {
             Ok(()) => (1i64, String::new()),

@@ -181,6 +181,9 @@ pub struct StatusReport {
     /// the mismatch long after setup.
     pub protagonist: String,
     pub protagonist_check: crate::naming::ProtagonistCheck,
+    /// Whether the protagonist corresponds to a cast member. Detectable from chapter 1,
+    /// unlike the split it prevents.
+    pub protagonist_cast: crate::naming::ProtagonistCast,
     /// Duplicates `prompt`'s `Pending` tag on purpose: a script wants a stable
     /// top-level boolean, not a match on the enum tag.
     pub prompt_edit_pending: bool,
@@ -240,6 +243,7 @@ pub fn status(store: &Store, buffer_target: u32, story_dir: &Path) -> Result<Sta
     Ok(StatusReport {
         prompt_edit_pending: prompt.edit_pending(),
         prompt,
+        protagonist_cast: crate::naming::check_protagonist_cast_in(store)?,
         protagonist,
         protagonist_check,
         latest_chapter,
@@ -264,6 +268,10 @@ pub fn status(store: &Store, buffer_target: u32, story_dir: &Path) -> Result<Sta
 /// "everything is fine" about every subsystem trains you to stop reading it.
 fn render_protagonist(out: &mut String, r: &StatusReport) {
     if let Some(w) = crate::naming::warning(&r.protagonist_check, &r.protagonist) {
+        out.push_str(&w);
+        out.push('\n');
+    }
+    if let Some(w) = crate::naming::cast_warning(&r.protagonist_cast, &r.protagonist) {
         out.push_str(&w);
         out.push('\n');
     }

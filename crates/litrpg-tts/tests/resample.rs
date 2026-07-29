@@ -201,25 +201,41 @@ fn empty_input_yields_empty_output_without_invoking_a_subprocess() {
 }
 
 #[test]
-fn the_filter_chain_is_built_in_the_verified_order() {
-    // Order matters: FX colouring, then loudness normalization, then resample.
-    // Normalizing before the compressor would be undone by it.
-    let chain = PostProcess::system_voice()
-        .with_loudnorm()
-        .filter_chain(24_000);
-    let fx = chain.find("tremolo").expect("FX stage missing");
-    let ln = chain.find("loudnorm").expect("loudnorm stage missing");
-    assert!(
-        fx < ln,
-        "loudnorm must come after the SYSTEM colouring: {chain}"
-    );
+fn loudnorm_is_never_fused_into_the_fx_filter_graph() {
+    // ⚠️ REGRESSION GUARD. Appending `loudnorm` downstream of
+    // `acompressor,highpass,lowpass` in one graph made the SYSTEM segment land at
+    // -23.1 LUFS instead of -20 — a 3.3 LU spread, audible as "the system voice is
+    // oddly quiet". Reverie's spike fuses FX with the *resample* (§2.5) and runs
+    // loudnorm standalone (§2.6); conflating those is what broke it.
+    //
+    // If someone "optimises" the two invocations back into one, this fails.
+    for pp in [
+        PostProcess::system_voice(),
+        PostProcess::normalized(),
+        PostProcess::plain().with_loudnorm(),
+    ] {
+        let chain = pp.filter_chain(24_000);
+        assert!(
+            !chain.contains("loudnorm"),
+            "loudnorm must be its own ffmpeg pass, not part of the stage-1 chain: {chain}"
+        );
+    }
+}
+
+#[test]
+fn the_system_filter_chain_is_built_in_the_verified_order() {
+    let chain = PostProcess::system_voice().filter_chain(24_000);
+    // Reverie's verified colouring, in her order.
+    let set = chain.find("asetrate").expect("asetrate missing");
+    let trem = chain.find("tremolo").expect("tremolo missing");
+    let comp = chain.find("acompressor").expect("acompressor missing");
+    assert!(set < trem && trem < comp, "FX order changed: {chain}");
     assert!(chain.contains("asetrate=24000*0.92"));
     assert!(chain.contains("aresample=24000"));
     assert!(chain.contains("atempo=1/0.92"));
     assert!(chain.contains("highpass=f=180"));
     assert!(chain.contains("lowpass=f=5200"));
     assert!(chain.contains("acompressor"));
-    assert!(chain.contains("loudnorm=I=-20:TP=-2:LRA=7"));
 }
 
 #[test]
@@ -288,6 +304,65 @@ fn a_missing_json_block_is_refused_rather_than_guessed() {
     assert!(
         LoudnormStats::parse(r#"{"input_i":"-25.1","input_tp":"-9.3"}"#).is_none(),
         "a partial block must not be half-applied"
+    );
+}
+
+/// Integrated loudness of a 16 kHz PCM buffer, via ffmpeg's `ebur128`.
+fn measure_lufs(pcm: &[u8]) -> Option<f64> {
+    let path = std::env::temp_dir().join("litrpg-resample-loudness.pcm");
+    std::fs::write(&path, pcm).ok()?;
+    let out = std::process::Command::new("ffmpeg")
+        .args([
+            "-hide_banner", "-nostats", "-f", "s16le", "-ar", "16000", "-ac", "1", "-i",
+        ])
+        .arg(&path)
+        .args(["-af", "ebur128", "-f", "null", "-"])
+        .output()
+        .ok()?;
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let _ = std::fs::remove_file(&path);
+    let idx = stderr.rfind("Integrated loudness")?;
+    stderr[idx..]
+        .lines()
+        .find(|l| l.trim_start().starts_with("I:"))?
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()
+}
+
+#[test]
+fn two_pass_loudnorm_hits_the_target_on_a_controlled_signal() {
+    let Some(pp) = ffmpeg_or_skip() else { return };
+    // A deliberately quiet, long-enough signal. 20 s gives EBU R128's gating plenty
+    // of blocks, so this measures the *normalizer*, not the measurement noise that
+    // makes a 2-3 s clip's integrated loudness unreliable.
+    let quiet: Vec<f32> = (0..24_000 * 20)
+        .map(|i| {
+            0.02 * (std::f32::consts::TAU * 180.0 * i as f32 / 24_000.0).sin()
+                * (0.6 + 0.4 * (std::f32::consts::TAU * 3.0 * i as f32 / 24_000.0).sin())
+        })
+        .collect();
+
+    let plain = pp.process(&quiet, 24_000, PostProcess::plain()).unwrap();
+    let normed = pp
+        .process(&quiet, 24_000, PostProcess::normalized())
+        .unwrap();
+
+    let Some(before) = measure_lufs(plain.as_bytes()) else {
+        eprintln!("SKIP: no ebur128 summary");
+        return;
+    };
+    let after = measure_lufs(normed.as_bytes()).expect("normalized measurement");
+    eprintln!("two-pass loudnorm: {before:.1} LUFS -> {after:.1} LUFS (target -20)");
+
+    assert!(
+        before < -25.0,
+        "test signal should start well below target, was {before:.1}"
+    );
+    assert!(
+        (after - -20.0).abs() < 1.0,
+        "two-pass loudnorm should land within 1 LU of -20, got {after:.1}"
     );
 }
 

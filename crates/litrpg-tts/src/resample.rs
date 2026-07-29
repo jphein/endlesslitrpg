@@ -25,8 +25,9 @@ pub struct PostProcess {
     ///
     /// Reverie found the real hazard here is not the resample but a **4.1 LU
     /// spread** across cori / Kokoro / Kokoro+FX, plainly audible as a level jump
-    /// at segment joins. `loudnorm` closes it to 0.7 LU, below the ~1 LU JND, and
-    /// lands the chapter inside the ACX window (spike Part 2 §2.6).
+    /// at segment joins. `loudnorm` closes it to well under the ~1 LU JND and lands
+    /// the chapter inside the ACX window (spike Part 2 §2.6) — **provided it runs as
+    /// its own pass** rather than fused into the FX graph.
     pub loudnorm: bool,
 }
 
@@ -44,7 +45,7 @@ impl PostProcess {
         }
     }
 
-    /// The `SYSTEM` stage: colour, normalize, resample — all in one ffmpeg pass.
+    /// The `SYSTEM` stage: colour + resample, then normalize as a separate pass.
     pub fn system_voice() -> Self {
         Self {
             system_fx: true,
@@ -75,12 +76,13 @@ impl PostProcess {
         }
     }
 
-    /// The `-af` argument, or empty when nothing is to be done.
+    /// The **stage-1** `-af` argument: the `SYSTEM` colouring, or empty.
     ///
-    /// Order is load-bearing: colouring first (its `acompressor` drives the level
-    /// hot), loudness normalization second so it measures the final signal. The
-    /// resample is not a filter — it is `-ar 16000` on the output, so ffmpeg's
-    /// soxr handles the non-integer 22 050→16 000 and 24 000→16 000 ratios.
+    /// `loudnorm` is deliberately **not** here. It runs as its own ffmpeg invocation
+    /// against the finished 16 kHz stream — see [`FfmpegPostProcessor`] for the
+    /// measurement that forced the split. The resample is not a filter either; it is
+    /// `-ar 16000` on the output, so ffmpeg's soxr handles the non-integer
+    /// 22 050→16 000 and 24 000→16 000 ratios.
     pub fn filter_chain(&self, native_rate: u32) -> String {
         let mut stages: Vec<String> = Vec::new();
         if self.system_fx {
@@ -94,39 +96,9 @@ impl PostProcess {
                 r = native_rate
             ));
         }
-        if self.loudnorm {
-            stages.push(LOUDNORM.to_string());
-        }
         stages.join(",")
     }
 
-    /// Pass-one chain: identical filters, plus JSON statistics.
-    fn measure_chain(&self, native_rate: u32) -> String {
-        let mut chain = self.without_loudnorm().filter_chain(native_rate);
-        if !chain.is_empty() {
-            chain.push(',');
-        }
-        chain.push_str(LOUDNORM);
-        chain.push_str(":print_format=json");
-        chain
-    }
-
-    /// Pass-two chain: `loudnorm` given pass one's measurements, so it applies a
-    /// known correction instead of adapting blind. `linear=true` asks for a single
-    /// gain change across the whole segment rather than dynamic movement, which is
-    /// what keeps a narration segment sounding un-pumped.
-    fn apply_chain(&self, native_rate: u32, s: &LoudnormStats) -> String {
-        let mut chain = self.without_loudnorm().filter_chain(native_rate);
-        if !chain.is_empty() {
-            chain.push(',');
-        }
-        chain.push_str(&format!(
-            "{LOUDNORM}:measured_I={:.2}:measured_TP={:.2}:measured_LRA={:.2}\
-             :measured_thresh={:.2}:offset={:.2}:linear=true",
-            s.input_i, s.input_tp, s.input_lra, s.input_thresh, s.target_offset
-        ));
-        chain
-    }
 }
 
 /// EBU R128 target. `I=-20` sits inside the ACX audiobook window (−18 to −23 LUFS).
@@ -141,17 +113,41 @@ pub trait PostProcessor: Send + Sync {
     fn process(&self, samples: &[f32], native_rate: u32, pp: PostProcess) -> Result<Pcm16k>;
 }
 
-/// The default [`PostProcessor`]: one `ffmpeg` subprocess per segment, samples in
-/// on stdin and raw PCM out on stdout — no temp files.
+/// The default [`PostProcessor`]. Samples in on stdin, raw PCM out on stdout — no
+/// temp files.
+///
+/// **Two stages, deliberately not one.** Stage 1 fuses the `SYSTEM` colouring with
+/// the resample; stage 2 runs `loudnorm` on its own, against the finished 16 kHz
+/// stream. That is exactly how Reverie measured it (spike Part 2 **§2.5** fuses FX
+/// with the *resample*; **§2.6** runs `loudnorm` as a standalone invocation), and
+/// the split is load-bearing:
+///
+/// Appending `loudnorm` downstream of `acompressor,highpass,lowpass` in a single
+/// filter graph made the SYSTEM segment land at **−23.1 LUFS** instead of −20 — a
+/// 3.3 LU spread, audible as "the system voice is oddly quiet". `loudnorm`
+/// estimating gain over a signal whose dynamics were just crushed and whose
+/// spectrum was just band-limited undershoots badly on a short segment.
+///
+/// **Do not "optimise" these back into one pass.** The extra invocation is cheap
+/// (see [`FfmpegPostProcessor::loudnorm_two_pass`]) and fusing silently
+/// reintroduces a level defect that only shows up dozens of chapters in.
 #[derive(Debug, Clone)]
 pub struct FfmpegPostProcessor {
     pub ffmpeg: String,
+    /// Whether stage 2 measures before correcting.
+    ///
+    /// Two-pass is strictly more accurate — it hands `loudnorm` the real
+    /// `measured_I/TP/LRA/thresh` instead of letting it adapt as it streams — and on
+    /// the 2–3 s segments a chapter is made of that accuracy is what keeps short
+    /// segments on target. Costs one more ffmpeg invocation per segment.
+    pub loudnorm_two_pass: bool,
 }
 
 impl Default for FfmpegPostProcessor {
     fn default() -> Self {
         Self {
             ffmpeg: std::env::var("LITRPG_FFMPEG").unwrap_or_else(|_| "ffmpeg".to_string()),
+            loudnorm_two_pass: true,
         }
     }
 }
@@ -160,7 +156,79 @@ impl FfmpegPostProcessor {
     pub fn new(ffmpeg: impl Into<String>) -> Self {
         Self {
             ffmpeg: ffmpeg.into(),
+            ..Self::default()
         }
+    }
+
+    /// Stage 2 argv: `loudnorm` alone, 16 kHz s16le in and out.
+    ///
+    /// `chain` is the loudnorm spec — bare for a measuring pass, or carrying
+    /// `measured_*` for an applying one. `verbose` raises the log level so
+    /// `print_format=json` survives (it logs at INFO, and `-v error` would drop it —
+    /// the same trap Reverie hit with `ebur128`).
+    fn args_loudnorm(&self, chain: &str, verbose: bool, discard: bool) -> Vec<String> {
+        let mut args: Vec<String> = vec![
+            "-hide_banner".into(),
+            "-nostdin".into(),
+            "-nostats".into(),
+            "-v".into(),
+            if verbose { "info".into() } else { "error".into() },
+            "-f".into(),
+            "s16le".into(),
+            "-ar".into(),
+            "16000".into(),
+            "-ac".into(),
+            "1".into(),
+            "-i".into(),
+            "pipe:0".into(),
+            "-af".into(),
+            chain.to_string(),
+        ];
+        if discard {
+            args.extend(["-f".into(), "null".into(), "-".into()]);
+        } else {
+            args.extend([
+                "-ar".into(),
+                "16000".into(),
+                "-ac".into(),
+                "1".into(),
+                "-f".into(),
+                "s16le".into(),
+                "-acodec".into(),
+                "pcm_s16le".into(),
+                "pipe:1".into(),
+            ]);
+        }
+        args
+    }
+
+    /// Stage 2: normalize an already-resampled 16 kHz stream.
+    fn apply_loudnorm(&self, pcm16k: &[u8]) -> Result<Vec<u8>> {
+        if self.loudnorm_two_pass {
+            let (_, stderr) = self.run_pass(
+                pcm16k,
+                self.args_loudnorm(&format!("{LOUDNORM}:print_format=json"), true, true),
+                "loudnorm measure",
+            )?;
+            // Near-silent input measures `-inf`; correcting from that is worse than
+            // not correcting, so fall through to the streaming pass.
+            if let Some(s) = LoudnormStats::parse(&stderr) {
+                let chain = format!(
+                    "{LOUDNORM}:measured_I={:.2}:measured_TP={:.2}:measured_LRA={:.2}\
+                     :measured_thresh={:.2}:offset={:.2}:linear=true",
+                    s.input_i, s.input_tp, s.input_lra, s.input_thresh, s.target_offset
+                );
+                let (out, _) =
+                    self.run_pass(pcm16k, self.args_loudnorm(&chain, false, false), "loudnorm apply")?;
+                return Ok(out);
+            }
+        }
+        let (out, _) = self.run_pass(
+            pcm16k,
+            self.args_loudnorm(LOUDNORM, false, false),
+            "loudnorm 1-pass",
+        )?;
+        Ok(out)
     }
 
     /// Whether the binary can be executed. Used by `available()` so a missing
@@ -220,43 +288,6 @@ impl FfmpegPostProcessor {
             "pipe:1".into(),
         ]);
         args
-    }
-
-    /// The measurement half of two-pass `loudnorm`: same filters, output discarded,
-    /// statistics printed as JSON.
-    ///
-    /// `-v info` is deliberate. `loudnorm`'s `print_format=json` block is logged at
-    /// INFO, so `-v error` would suppress it and this pass would silently measure
-    /// nothing — the same trap Reverie hit with `ebur128`.
-    fn args_measure(&self, native_rate: u32, pp: PostProcess) -> Vec<String> {
-        let mut args: Vec<String> = vec![
-            "-hide_banner".into(),
-            "-nostdin".into(),
-            "-nostats".into(),
-            "-v".into(),
-            "info".into(),
-            "-f".into(),
-            "f32le".into(),
-            "-ar".into(),
-            native_rate.to_string(),
-            "-ac".into(),
-            "1".into(),
-            "-i".into(),
-            "pipe:0".into(),
-            "-af".into(),
-            pp.measure_chain(native_rate),
-            "-f".into(),
-            "null".into(),
-            "-".into(),
-        ];
-        args.retain(|a| !a.is_empty());
-        args
-    }
-
-    /// The applying half: `loudnorm` fed the measured statistics, so it corrects
-    /// with full knowledge of the signal instead of streaming blind.
-    fn args_apply(&self, native_rate: u32, pp: PostProcess, stats: &LoudnormStats) -> Vec<String> {
-        self.args_with_chain(native_rate, &pp.apply_chain(native_rate, stats))
     }
 
     /// Run one ffmpeg pass, returning `(stdout, stderr)`.
@@ -369,45 +400,20 @@ impl PostProcessor for FfmpegPostProcessor {
             bytes.extend_from_slice(&s.to_le_bytes());
         }
 
-        if !pp.loudnorm {
-            let (out, _) = self.run_pass(&bytes, self.args(native_rate, pp), "resample")?;
-            return self.finish(out);
-        }
-
-        // Two-pass loudnorm. Single-pass `loudnorm` is a *streaming* normalizer: it
-        // corrects as it goes, with only its lookahead buffer to work from. On the
-        // 2-3 s segments a chapter is made of that is not enough to converge —
-        // measured a 2.0 LU spread across cori / Kokoro / Kokoro+FX, above the ~1 LU
-        // just-noticeable difference and plainly audible at a segment join. Reverie's
-        // 0.7 LU figure came from 8-13 s segments, which is why single-pass looked
-        // sufficient in the spike. Measuring first and then correcting with the real
-        // statistics is what makes short segments level.
-        //
-        // Cost is one extra ffmpeg invocation per segment, still far under 2% of
-        // synthesis. The FX chain runs in *both* passes so pass one measures the
-        // coloured signal, not the raw one.
-        let (_, stderr) = self.run_pass(
+        // Stage 1 — [SYSTEM colouring,] resample to the 16 kHz contract. Reverie's
+        // spike Part 2 §2.5: FX and resample compose correctly in one pass.
+        let (resampled, _) = self.run_pass(
             &bytes,
-            self.args_measure(native_rate, pp),
-            "loudnorm measure",
+            self.args(native_rate, pp.without_loudnorm()),
+            "resample",
         )?;
 
-        match LoudnormStats::parse(&stderr) {
-            Some(stats) => {
-                let (out, _) = self.run_pass(
-                    &bytes,
-                    self.args_apply(native_rate, pp, &stats),
-                    "loudnorm apply",
-                )?;
-                self.finish(out)
-            }
-            // Near-silent input measures as `-inf`; correcting from that is worse
-            // than not correcting. Degrade to the single streaming pass.
-            None => {
-                let (out, _) =
-                    self.run_pass(&bytes, self.args(native_rate, pp), "resample (1-pass)")?;
-                self.finish(out)
-            }
+        if !pp.loudnorm {
+            return self.finish(resampled);
         }
+
+        // Stage 2 — loudnorm, on its own, against the finished stream (§2.6).
+        // Never fused with stage 1: see the type-level comment.
+        self.finish(self.apply_loudnorm(&resampled)?)
     }
 }

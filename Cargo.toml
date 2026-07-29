@@ -30,7 +30,7 @@ tokio = { version = "1.53.1", features = [
     "sync",
     "time",
 ] }
-reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "charset", "http2"] }
 async-trait = "0.1.91"
 # Native TTS. Kept optional and off by default so a plain `cargo test` never
 # builds sherpa-onnx; enable with `--features sherpa`.

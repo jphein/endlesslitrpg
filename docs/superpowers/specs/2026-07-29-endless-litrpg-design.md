@@ -254,6 +254,40 @@ Consequence for §10: an empty `content` is *not* interchangeable with a network
 type distinguishes them, because "the model reasoned itself out of budget" wants a retry with
 thinking off, while a network failure wants backoff.
 
+### 5.3 The prompt instructs strictly; the parser accepts leniently. Do not "fix" this.
+
+`prompt.rs` tells the model to emit `[narrator]`. `parse.rs` accepts `narrator` *and* `narration`,
+case-insensitively, tolerant of whitespace and of a typo within a bounded edit distance. Those two
+look like a duplicated contract that has drifted. **They are not, and making them agree would
+re-introduce two bugs we have already shipped.**
+
+The evidence is on the record: a live chapter emitted `[narration]` for most of its length, and
+another emitted `narraraor` — the model mistyping its own tag. Both were classified as *characters*,
+which minted permanent `cast` rows and gave a chapter's narration a character's voice. A parser that
+matched the instruction exactly would reject or mis-attribute both.
+
+So the asymmetry is the design: **strict on what we ask for, lenient on what we accept.** That is
+the correct shape for a contract with a model that will not comply exactly, and it is why rejecting a
+typo'd narrator tag would be the wrong repair — it loses the prose rather than saving it. Anything an
+LLM emits that becomes durable identity needs *canonicalisation*, not validation.
+
+### 5.4 Ranking duplicated values by whether a mismatch is silent
+
+Five instances of one shape have now been fixed — config paths, the prompt hash, the prompt's
+legal-field list, the chapter filename convention, and `SpeakerKind`'s string form. The useful
+question when auditing for a sixth is **not how many copies exist**:
+
+> Do the copies sit on opposite sides of a trust boundary that nothing checks?
+
+The worst instance found crossed a crate boundary *and* a language boundary — a Rust value written as
+a SQL literal — which is precisely why no compiler and no test caught it. The healthiest apparent
+instance (§5.3) has two copies inside one crate, differs *on purpose*, and is tested.
+
+Counting copies would have ranked the healthy one highest and the dangerous one nowhere. Note also
+what the technique cannot find: grepping for a duplicated **literal** catches `{:04}` and
+`"narrator"`, and would never have found the prompt-hash instance, because "config path resolution"
+is not a string.
+
 ---
 
 ## 6. Data model

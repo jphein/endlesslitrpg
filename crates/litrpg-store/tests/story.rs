@@ -177,3 +177,31 @@ fn upsert_preserves_the_playback_cursor() {
         "upsert_story reset the playback cursor — init --force must never do that"
     );
 }
+
+#[test]
+fn the_in_effect_prompt_hash_is_a_single_field_write() {
+    let store = Store::open_in_memory().unwrap();
+    store.upsert_story(&new_story("Endless", "Kaelen")).unwrap();
+    store.set_arc_outline("## Arc 1").unwrap();
+    store.set_consumed_through(3).unwrap();
+
+    store.set_prompt_hash("fnv1a64:deadbeefdeadbeef").unwrap();
+
+    let s = store.story().unwrap().unwrap();
+    assert_eq!(s.prompt_hash, "fnv1a64:deadbeefdeadbeef");
+    // The point of a single-field setter: everything else is untouched, so it cannot
+    // revert a concurrent metadata change the way a read-modify-write could.
+    assert_eq!(s.arc_outline_md, "## Arc 1");
+    assert_eq!(s.consumed_through, 3);
+    assert_eq!(s.title, "Endless");
+    assert_eq!(s.protagonist, "Kaelen");
+}
+
+#[test]
+fn stamping_the_prompt_hash_without_a_story_is_an_error() {
+    let store = Store::open_in_memory().unwrap();
+    let err = store
+        .set_prompt_hash("fnv1a64:0000000000000000")
+        .unwrap_err();
+    assert!(err.to_string().contains("no story row"), "{err}");
+}

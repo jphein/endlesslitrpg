@@ -155,6 +155,29 @@ impl Store {
         Ok(())
     }
 
+    /// Record the prompt hash now **in effect** — the premise a chapter was actually
+    /// written from.
+    ///
+    /// Engine-owned, and stamped only after a chapter exists that used it. `litrpg
+    /// prompt` deliberately does not write this: §9.3 reloads at chapter boundaries, so
+    /// the column lagging an edited file is the *truth* about what the engine is using,
+    /// and that lag is what `litrpg status` reports as a pending edit.
+    ///
+    /// A single-field setter rather than a read-modify-write through
+    /// [`Store::upsert_story`], which the engine was doing for want of this. Matches
+    /// [`Store::set_arc_outline`] and [`Store::set_consumed_through`] — one statement,
+    /// no chance of reverting a concurrent metadata change.
+    pub fn set_prompt_hash(&self, hash: &str) -> Result<()> {
+        let n = self.conn.execute(
+            "UPDATE story SET prompt_hash = ?1, updated_at = ?2",
+            params![hash, now_ms()],
+        )?;
+        if n == 0 {
+            return Err(StoreError::NoStoryRow);
+        }
+        Ok(())
+    }
+
     /// Replace the arc outline. Engine-owned; nothing else should call this.
     ///
     /// Errors rather than no-ops when there is no story row, because a silent

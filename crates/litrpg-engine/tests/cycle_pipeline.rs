@@ -797,6 +797,181 @@ async fn an_established_character_is_never_re_voiced_by_a_late_hint() {
 }
 
 // ---------------------------------------------------------------------------
+// `story.prompt_hash` means "the premise now in effect". `litrpg prompt`
+// deliberately does not write it, so the engine restamping it at a chapter
+// boundary is what stops `litrpg status` reporting a pending edit forever.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_produced_chapter_stamps_the_prompt_hash_it_used() {
+    let e = engine(
+        FakeGenerator::new(),
+        FakeRenderer::new(),
+        FakeLibrary::new(),
+        FakeArtifacts::new(),
+    );
+    e.run_cycle(BufferCursor::At(0)).await.unwrap();
+
+    let stamped = e.library().hashes_stamped();
+    assert_eq!(stamped.len(), 1, "exactly once per chapter: {stamped:?}");
+    assert_eq!(
+        stamped[0],
+        e.prompt_hash(1),
+        "the stamped value must be the one recorded on the chapter, not a re-hash of the file"
+    );
+    assert!(
+        stamped[0].starts_with("fnv1a64:"),
+        "core's algorithm, not a second one"
+    );
+}
+
+#[tokio::test]
+async fn an_abandoned_cycle_stamps_nothing() {
+    // Pass 1 failed, so no chapter was written from this premise and it was never *in effect*.
+    // Stamping here would clear a pending-edit warning while producing nothing.
+    let e = engine(
+        FakeGenerator::new().push_pass1(Err(EmberError::Transport {
+            detail: "down".into(),
+        })),
+        FakeRenderer::new(),
+        FakeLibrary::new(),
+        FakeArtifacts::new(),
+    );
+    assert!(matches!(
+        e.run_cycle(BufferCursor::At(0)).await.unwrap(),
+        CycleOutcome::Abandoned { .. }
+    ));
+    assert!(
+        e.library().hashes_stamped().is_empty(),
+        "an abandoned cycle must leave the pending-edit warning standing"
+    );
+}
+
+#[tokio::test]
+async fn an_idle_cycle_stamps_nothing() {
+    let e = engine(
+        FakeGenerator::new(),
+        FakeRenderer::new(),
+        FakeLibrary::new(),
+        FakeArtifacts::new(),
+    );
+    for _ in 0..3 {
+        e.run_cycle(BufferCursor::At(0)).await.unwrap();
+    }
+    let before = e.library().hashes_stamped().len();
+    assert!(matches!(
+        e.run_cycle(BufferCursor::At(0)).await.unwrap(),
+        CycleOutcome::Idle { .. }
+    ));
+    assert_eq!(
+        e.library().hashes_stamped().len(),
+        before,
+        "idling consults no premise"
+    );
+}
+
+#[tokio::test]
+async fn a_resumed_render_stamps_nothing() {
+    // Resume renders audio for prose that already shipped and never reads the premise, so it has
+    // no business claiming a premise is in effect.
+    let e = engine(
+        FakeGenerator::new(),
+        FakeRenderer::failing(),
+        FakeLibrary::new(),
+        FakeArtifacts::new(),
+    );
+    e.run_cycle(BufferCursor::At(0)).await.unwrap();
+    let after_generation = e.library().hashes_stamped().len();
+    assert_eq!(after_generation, 1);
+
+    let e = Engine::with_shared_store(
+        e.into_shared_store(),
+        FakeGenerator::new(),
+        FakeRenderer::new(),
+        FakeLibrary::new(),
+        FakeArtifacts::new(),
+        config(),
+    );
+    assert!(matches!(
+        e.run_cycle(BufferCursor::At(0)).await.unwrap(),
+        CycleOutcome::ResumedRender { .. }
+    ));
+    assert!(
+        e.library().hashes_stamped().is_empty(),
+        "a resume must not stamp: this engine generated nothing"
+    );
+}
+
+#[tokio::test]
+async fn a_chapter_that_ships_without_audio_still_stamps() {
+    // The premise was in effect: prose exists. Audio is a separate artifact (§10).
+    let e = engine(
+        FakeGenerator::new(),
+        FakeRenderer::failing(),
+        FakeLibrary::new(),
+        FakeArtifacts::new(),
+    );
+    e.run_cycle(BufferCursor::At(0)).await.unwrap();
+    assert!(!e.has_audio(1));
+    assert_eq!(e.library().hashes_stamped().len(), 1);
+}
+
+#[tokio::test]
+async fn a_state_dirty_chapter_still_stamps() {
+    // Pass 2 failing is bookkeeping; the prose was still written from this premise.
+    let e = engine(
+        FakeGenerator::new().with_pass2_always_malformed(),
+        FakeRenderer::new(),
+        FakeLibrary::new(),
+        FakeArtifacts::new(),
+    );
+    e.run_cycle(BufferCursor::At(0)).await.unwrap();
+    assert_eq!(e.library().hashes_stamped().len(), 1);
+    assert_eq!(e.library().hashes_stamped()[0], e.prompt_hash(1));
+}
+
+#[tokio::test]
+async fn an_edited_premise_changes_the_stamp_at_the_next_boundary() {
+    // The live symptom: chapter 4 used the new premise, but nothing restamped, so `litrpg status`
+    // reported a pending edit permanently.
+    let e = engine(
+        FakeGenerator::new(),
+        FakeRenderer::new(),
+        FakeLibrary::new(),
+        FakeArtifacts::new(),
+    );
+    e.run_cycle(BufferCursor::Drain).await.unwrap();
+    let first = e.library().hashes_stamped()[0].clone();
+    assert_eq!(first, e.prompt_hash(1));
+
+    // JP edits `prompt.md`. `StoreLibrary` re-reads it every cycle, so a fresh library with a
+    // different premise over the same store is exactly that situation.
+    let mut edited = FakeLibrary::new();
+    edited.story.prompt_md = "A wholly new premise.".to_string();
+    let e = Engine::with_shared_store(
+        e.into_shared_store(),
+        FakeGenerator::new(),
+        FakeRenderer::new(),
+        edited,
+        FakeArtifacts::new(),
+        config(),
+    );
+    e.run_cycle(BufferCursor::Drain).await.unwrap();
+
+    let stamped = e.library().hashes_stamped();
+    assert_eq!(stamped.len(), 1, "this engine produced one chapter");
+    assert_ne!(
+        stamped[0], first,
+        "the edit must take effect at the boundary"
+    );
+    assert_eq!(
+        stamped[0],
+        e.prompt_hash(2),
+        "and must equal what chapter 2 recorded"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Subject canonicalisation (issue #11). One character must not become two
 // ledger keys, and two characters must never become one.
 // ---------------------------------------------------------------------------

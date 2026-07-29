@@ -64,7 +64,10 @@ pub mod sherpa;
 pub use azure::{RenderPart, VoicePreflight};
 pub use backend::{Availability, CostClass, Gender, RenderRequest, TtsBackend, VoiceDesc};
 pub use error::{Result, TtsError};
-pub use pcm::{Assembly, DEFAULT_GAP_MS, Pcm16k, PcmError, Span, assemble};
+pub use pcm::{
+    Assembly, DEFAULT_GAP_MS, FailedSegment, Pcm16k, PcmError, Span, assemble,
+    fill_failures_with_silence,
+};
 pub use registry::TtsRegistry;
 pub use resample::{FfmpegPostProcessor, PostProcess, PostProcessor};
 

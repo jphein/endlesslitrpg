@@ -60,5 +60,8 @@ pub use error::{CycleOutcome, EngineError};
 pub use library::StoreLibrary;
 pub use ports::{Artifacts, Generator, Library, Renderer, StoryMeta};
 pub use publish::FsArtifacts;
-pub use render::{PlannedSegment, RenderedChapter, assemble, chapter_markdown, word_count};
+pub use render::{
+    PlannedSegment, RenderedChapter, SENTENCE_TARGET_CHARS, assemble, chapter_markdown,
+    sentence_pieces, split_by_sentence, word_count,
+};
 pub use voices::{VoicePlan, plan_voices};

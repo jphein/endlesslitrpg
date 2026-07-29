@@ -72,6 +72,49 @@ pub const TIMEOUT_FLOOR_SECS: u64 = 30;
 /// four-way contention pushed it past three minutes.
 pub const TIMEOUT_MS_PER_CHAR: u64 = 150;
 
+/// Total attempts per HTTP request, including the first.
+///
+/// Retry lives at the **request** level, which is the unit of network work — and that
+/// makes chunk-level and segment-level retry unnecessary, since a chunk *is* a request
+/// and a segment is made of requests. Chapter 3 lost 18 minutes of audio to one
+/// "error decoding response body" that succeeded on the very next attempt.
+pub const MAX_ATTEMPTS: u32 = 3;
+
+/// First backoff delay; doubles per attempt.
+pub const RETRY_BASE_DELAY_MS: u64 = 500;
+
+/// Whether a failure is worth another attempt.
+///
+/// **The distinction is the whole point.** A transient blip costs one retry and saves a
+/// chapter; retrying a permanent rejection burns quota three times to fail identically.
+/// The Ollie 400 was permanent — a voice name that never existed — and retrying it
+/// would have tripled the cost of a guaranteed failure.
+///
+/// Retryable: transport errors (connect, TLS, **body-decode** — the one that cost
+/// chapter 3), 5xx, 429 rate limits, 408 request timeout.
+/// Not retryable: every other 4xx (bad voice, malformed SSML, bad key), a bad PCM
+/// length, a missing credential — none improve on a second try.
+pub fn is_retryable(err: &TtsError) -> bool {
+    match err {
+        // reqwest surfaces connect / TLS / timeout / body-decode failures here.
+        TtsError::Http(_) => true,
+        TtsError::HttpStatus { status, .. } => *status >= 500 || *status == 429 || *status == 408,
+        _ => false,
+    }
+}
+
+/// Backoff before attempt `attempt` (1-based; attempt 1 never waits).
+///
+/// Exponential from [`RETRY_BASE_DELAY_MS`]. Short on purpose: this absorbs a network
+/// hiccup, and a long backoff on a 40-segment chapter would cost more wall clock than
+/// the failure did.
+pub fn retry_delay(attempt: u32) -> Duration {
+    if attempt <= 1 {
+        return Duration::ZERO;
+    }
+    Duration::from_millis(RETRY_BASE_DELAY_MS << (attempt - 2).min(6))
+}
+
 /// Per-request timeout, scaled to the work.
 ///
 /// A 200-word notification and a 2 000-word chapter must not share a budget — that
@@ -699,6 +742,8 @@ pub struct AzureBackend {
     fallback_on_reject: bool,
     /// Largest text one request may carry. Defaults to [`MAX_CHARS_PER_REQUEST`].
     max_chars_per_request: usize,
+    /// Attempts per HTTP request, including the first. Defaults to [`MAX_ATTEMPTS`].
+    max_attempts: u32,
     /// Loudness-normalize each rendered segment. **On by default.**
     ///
     /// Azure serves 16 kHz natively, so this path skips the resampler entirely — and
@@ -734,8 +779,21 @@ impl AzureBackend {
             fallback_on_reject: false,
             max_chars_per_request: MAX_CHARS_PER_REQUEST,
             normalize: true,
+            max_attempts: MAX_ATTEMPTS,
             post: FfmpegPostProcessor::default(),
         }
+    }
+
+    /// Override attempts per request. `1` disables retry.
+    #[must_use]
+    pub fn with_max_attempts(mut self, attempts: u32) -> Self {
+        self.max_attempts = attempts.max(1);
+        self
+    }
+
+    /// Attempts per request in effect.
+    pub fn max_attempts(&self) -> u32 {
+        self.max_attempts
     }
 
     /// Turn per-segment loudness normalization off. Only sensible where `ffmpeg` is
@@ -1045,6 +1103,41 @@ impl AzureBackend {
     /// `text_chars` is the number of characters of *spoken text* in the document (not
     /// the markup), which is what the timeout scales from.
     async fn post_ssml(&self, ssml: String, text_chars: usize) -> Result<Pcm16k> {
+        let mut last: Option<TtsError> = None;
+        for attempt in 1..=self.max_attempts {
+            let delay = retry_delay(attempt);
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
+            match self.post_ssml_once(ssml.clone(), text_chars).await {
+                Ok(pcm) => {
+                    if attempt > 1 {
+                        eprintln!(
+                            "litrpg-tts: azure request succeeded on attempt {attempt}/{}",
+                            self.max_attempts
+                        );
+                    }
+                    return Ok(pcm);
+                }
+                Err(e) if is_retryable(&e) && attempt < self.max_attempts => {
+                    // Visible on purpose: a silently-retried request hides a degrading
+                    // network until it stops being transient.
+                    eprintln!(
+                        "litrpg-tts: azure attempt {attempt}/{} failed ({e}); retrying in {:?}",
+                        self.max_attempts,
+                        retry_delay(attempt + 1)
+                    );
+                    last = Some(e);
+                }
+                // Permanent, or attempts exhausted.
+                Err(e) => return Err(e),
+            }
+        }
+        Err(last.unwrap_or_else(|| TtsError::Worker("no attempt was made".into())))
+    }
+
+    /// One attempt: POST one SSML document and return the raw PCM body.
+    async fn post_ssml_once(&self, ssml: String, text_chars: usize) -> Result<Pcm16k> {
         let resp = self
             .client
             .post(self.config.endpoint())
@@ -1229,6 +1322,7 @@ impl AzureBackend {
             fallback_on_reject: self.fallback_on_reject,
             max_chars_per_request: self.max_chars_per_request,
             normalize: self.normalize,
+            max_attempts: self.max_attempts,
             post: self.post.clone(),
         }
     }

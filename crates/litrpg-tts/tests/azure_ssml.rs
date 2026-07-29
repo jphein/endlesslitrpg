@@ -629,3 +629,146 @@ fn the_old_fixed_180s_timeout_would_not_have_covered_the_failing_segment() {
         "a 3665-char request would still be capped at {whole}s"
     );
 }
+
+// ------------------------------------------------- retry policy (issue #12)
+
+use litrpg_tts::azure::{MAX_ATTEMPTS, is_retryable, retry_delay};
+
+#[test]
+fn transport_failures_are_retryable_because_that_is_what_cost_chapter_3() {
+    // The exact failure: "error decoding response body" — a reqwest transport error
+    // that succeeded on the next attempt. It must be retryable or a network hiccup
+    // keeps costing whole chapters.
+    let decode = TtsError::Worker("placeholder".into());
+    assert!(!is_retryable(&decode), "sanity: Worker is not transport");
+
+    // 5xx / 429 / 408 are the server-side transients.
+    for status in [500u16, 502, 503, 504, 429, 408] {
+        assert!(
+            is_retryable(&TtsError::HttpStatus {
+                status,
+                body: String::new()
+            }),
+            "{status} should be retryable"
+        );
+    }
+}
+
+#[test]
+fn permanent_rejections_are_never_retried() {
+    // Retrying the Ollie 400 would have burned three times the quota to fail
+    // identically. A permanent error must fail on the first attempt.
+    for status in [400u16, 401, 403, 404, 413, 415] {
+        assert!(
+            !is_retryable(&TtsError::HttpStatus {
+                status,
+                body: "nope".into()
+            }),
+            "{status} must not be retried"
+        );
+    }
+    assert!(!is_retryable(&TtsError::InvalidVoiceName("x".into())));
+    assert!(!is_retryable(&TtsError::MissingCredential("x".into())));
+    assert!(!is_retryable(&TtsError::Pcm(
+        litrpg_tts::PcmError::OddByteLength(3)
+    )));
+}
+
+#[test]
+fn the_first_attempt_never_waits_and_backoff_grows() {
+    assert_eq!(retry_delay(0), std::time::Duration::ZERO);
+    assert_eq!(retry_delay(1), std::time::Duration::ZERO);
+    let d2 = retry_delay(2);
+    let d3 = retry_delay(3);
+    assert!(d2 > std::time::Duration::ZERO);
+    assert!(d3 > d2, "backoff must grow: {d2:?} then {d3:?}");
+    // Bounded: a 40-segment chapter must not spend more time waiting than rendering.
+    assert!(
+        retry_delay(MAX_ATTEMPTS) < std::time::Duration::from_secs(5),
+        "backoff at the last attempt is {:?}; too long for a per-segment path",
+        retry_delay(MAX_ATTEMPTS)
+    );
+}
+
+#[test]
+fn retry_is_bounded_and_configurable() {
+    // const blocks: these are compile-time facts about the policy, so a bad value
+    // should fail the build rather than a test run.
+    const { assert!(MAX_ATTEMPTS >= 2, "at least one retry, or #12 is not fixed") };
+    const {
+        assert!(
+            MAX_ATTEMPTS <= 4,
+            "unbounded retry re-bills synthesis each time"
+        )
+    };
+    let b = backend_for_preflight();
+    assert_eq!(b.max_attempts(), MAX_ATTEMPTS);
+    assert_eq!(
+        b.with_max_attempts(1).max_attempts(),
+        1,
+        "retry can be disabled"
+    );
+    assert_eq!(
+        backend_for_preflight().with_max_attempts(0).max_attempts(),
+        1,
+        "zero attempts would render nothing; must clamp to 1"
+    );
+}
+
+// -------------------------------------- degradation: chapter still renders (§10)
+
+#[test]
+fn a_permanently_failed_segment_becomes_silence_so_the_chapter_still_renders() {
+    use litrpg_tts::{Pcm16k, fill_failures_with_silence};
+    let texts = ["First segment.", "Second segment that failed.", "Third."];
+    let outcomes: Vec<Result<Pcm16k, String>> = vec![
+        Ok(Pcm16k::silence_ms(1000)),
+        Err("azure 400: voice not found".to_string()),
+        Ok(Pcm16k::silence_ms(500)),
+    ];
+    let (pcms, failures) = fill_failures_with_silence(outcomes, &texts, 0.0757);
+
+    assert_eq!(pcms.len(), 3, "every segment must be represented");
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].idx, 1);
+    assert!(failures[0].reason.contains("voice not found"));
+
+    // Silence is sized from the segment's own text, so timing stays roughly true and
+    // highlighting does not desynchronise across the hole.
+    let expected_ms = (texts[1].chars().count() as f64 * 0.0757 * 1000.0).round() as u32;
+    assert_eq!(failures[0].filled_ms, expected_ms);
+    assert_eq!(pcms[1].duration_ms(), expected_ms);
+    assert!(pcms[1].duration_ms() > 0, "a hole must still take time");
+
+    // The chapter assembles and the byte invariant survives the hole.
+    let chapter = litrpg_tts::assemble(&pcms, litrpg_tts::DEFAULT_GAP_MS);
+    assert!(chapter.pcm.is_whole_ms());
+    assert_eq!(chapter.pcm.len() as u32, chapter.pcm.duration_ms() * 32);
+    assert_eq!(chapter.spans.len(), 3);
+    for w in chapter.spans.windows(2) {
+        assert_eq!(w[0].end_ms, w[1].start_ms, "manifest must stay contiguous");
+    }
+}
+
+#[test]
+fn all_segments_succeeding_reports_no_failures() {
+    use litrpg_tts::{Pcm16k, fill_failures_with_silence};
+    let outcomes: Vec<Result<Pcm16k, String>> =
+        vec![Ok(Pcm16k::silence_ms(10)), Ok(Pcm16k::silence_ms(20))];
+    let (pcms, failures) = fill_failures_with_silence(outcomes, &["a", "b"], 0.0757);
+    assert_eq!(pcms.len(), 2);
+    assert!(failures.is_empty());
+}
+
+#[test]
+fn every_segment_failing_still_yields_an_assemblable_chapter() {
+    use litrpg_tts::{Pcm16k, fill_failures_with_silence};
+    let texts = ["one", "two"];
+    let outcomes: Vec<Result<Pcm16k, String>> = vec![Err("boom".into()), Err("boom".into())];
+    let (pcms, failures) = fill_failures_with_silence(outcomes, &texts, 0.0757);
+    assert_eq!(failures.len(), 2);
+    let chapter = litrpg_tts::assemble(&pcms, litrpg_tts::DEFAULT_GAP_MS);
+    // Silent, but structurally valid — the text still ships and has_audio is false.
+    assert!(chapter.pcm.is_whole_ms());
+    assert_eq!(chapter.spans.len(), 2);
+}

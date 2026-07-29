@@ -43,7 +43,7 @@ use tracing::{debug, info, warn};
 use crate::cast::{CastAssignment, ParsedSpeaker, VoiceAssigner};
 use crate::error::{CycleOutcome, EngineError};
 use crate::ports::{Artifacts, Generator, Library, Renderer};
-use crate::render::{PlannedSegment, assemble, chapter_markdown, plan_requests};
+use crate::render::{PlannedSegment, assemble, chapter_markdown, plan_requests, sentence_pieces};
 
 /// Spec §6.3 — the last five chapter summaries.
 pub const SUMMARY_WINDOW: usize = 5;
@@ -106,6 +106,16 @@ pub struct EngineConfig {
     /// Needed because the `cast` table can hold a `voice_ref` for a backend this process did not
     /// load — a row written by a sherpa-enabled build, read by an Azure-only one.
     pub renderable_backends: Vec<String>,
+    /// Emit one manifest entry per **sentence** rather than per speaker turn (§9.4).
+    ///
+    /// Turn-level entries cannot drive sentence highlighting: measured on live chapter 1, the
+    /// mean entry was 64.7 s and the longest 203 s, with 3 665 chars of prose — a highlight that
+    /// sits still for three minutes reads as broken rather than as absent.
+    ///
+    /// The flag exists to make this revertible: turn-level highlighting is still serviceable, so
+    /// if per-sentence synthesis ever costs too much wall clock or hurts the joins, this reverts
+    /// without touching the pipeline.
+    pub sentence_manifest: bool,
     pub summary_window: usize,
 }
 
@@ -119,6 +129,7 @@ impl Default for EngineConfig {
             character_voices: crate::cast::character_pool(),
             voice_genders: BTreeMap::new(),
             renderable_backends: Vec::new(),
+            sentence_manifest: true,
             summary_window: SUMMARY_WINDOW,
         }
     }
@@ -134,6 +145,7 @@ impl EngineConfig {
             character_voices: c.character_voices.clone(),
             voice_genders: BTreeMap::new(),
             renderable_backends: Vec::new(),
+            sentence_manifest: true,
             summary_window: SUMMARY_WINDOW,
         }
     }
@@ -438,7 +450,7 @@ where
         let new_cast = assigner.assign(&speakers, &existing_cast);
         for a in &new_cast {
             info!(speaker = %a.speaker, voice = %a.voice_ref, "casting new speaker");
-            self.with_store(|s| s.upsert_cast(&a.speaker, &a.voice_ref, kind_str(a.kind), number))?;
+            self.with_store(|s| s.upsert_cast(&a.speaker, &a.voice_ref, a.kind.as_str(), number))?;
         }
 
         // Mutable because a gender hint from pass 2 can re-voice a speaker cast this cycle,
@@ -544,7 +556,7 @@ where
                         s.upsert_cast(
                             &fixed.speaker,
                             &fixed.voice_ref,
-                            kind_str(fixed.kind),
+                            fixed.kind.as_str(),
                             number,
                         )
                     })?;
@@ -717,6 +729,22 @@ where
         number: u32,
         planned: &[PlannedSegment],
     ) -> Result<(), EngineError> {
+        // Split here and nowhere else: the markdown and the pass-2 text are already built from
+        // whole turns, and doing it at the last moment covers the fresh and resume paths with one
+        // call. Idempotent, so re-splitting stored segments on a resume is a no-op.
+        let planned: Vec<PlannedSegment> = if self.config.sentence_manifest {
+            let split = crate::render::split_by_sentence(planned.to_vec(), sentence_pieces);
+            debug!(
+                turns = planned.len(),
+                entries = split.len(),
+                "split speaker turns into per-sentence manifest entries"
+            );
+            split
+        } else {
+            planned.to_vec()
+        };
+        let planned = planned.as_slice();
+
         let requests = plan_requests(planned)?;
         let parts = self.renderer.render_all(&requests).await?;
         let rendered = assemble(number, planned, parts)?;
@@ -803,7 +831,7 @@ where
         let assigner = self.assigner();
         let new_cast = assigner.assign(&distinct_speakers(&parsed), &existing_cast);
         for a in &new_cast {
-            self.with_store(|s| s.upsert_cast(&a.speaker, &a.voice_ref, kind_str(a.kind), number))?;
+            self.with_store(|s| s.upsert_cast(&a.speaker, &a.voice_ref, a.kind.as_str(), number))?;
         }
 
         Ok(plan_segments(
@@ -883,14 +911,6 @@ pub fn plain_chapter_text(planned: &[PlannedSegment]) -> String {
         .map(|p| p.text.as_str())
         .collect::<Vec<_>>()
         .join("\n\n")
-}
-
-fn kind_str(kind: litrpg_core::SpeakerKind) -> &'static str {
-    match kind {
-        litrpg_core::SpeakerKind::Narrator => "narrator",
-        litrpg_core::SpeakerKind::Character => "character",
-        litrpg_core::SpeakerKind::System => "system",
-    }
 }
 
 /// Drop the `# Chapter N: Title` heading that [`chapter_markdown`] adds, so re-parsing a

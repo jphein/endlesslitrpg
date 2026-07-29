@@ -642,6 +642,48 @@ async fn full_length_chapter_chunk_report() {
          whole chapter {whole:.1} LUFS"
     );
 
+    // Now the same segments through the normalizer the render path actually applies.
+    // `render_parts` bypasses it on purpose so chunk joins can be measured raw, so
+    // this closes the loop — and costs nothing extra, since the audio is already paid
+    // for and `normalize_16k` is local ffmpeg.
+    let post = litrpg_tts::FfmpegPostProcessor::default();
+    let normed: Vec<Pcm16k> = seg_pcms
+        .iter()
+        .map(|p| post.normalize_16k(p).unwrap())
+        .collect();
+    let normed_levels: Vec<f64> = normed
+        .iter()
+        .enumerate()
+        .filter_map(|(i, p)| lufs(p, &format!("n{i}")))
+        .collect();
+    let normed_spread = normed_levels.iter().cloned().fold(f64::MIN, f64::max)
+        - normed_levels.iter().cloned().fold(f64::MAX, f64::min);
+    eprintln!(
+        "cross-segment spread after per-segment loudnorm: {normed_spread:.1} LU  {:?}",
+        normed_levels
+            .iter()
+            .map(|v| format!("{v:.1}"))
+            .collect::<Vec<_>>()
+    );
+
+    // The defect must still reproduce un-normalized (else the normalization is dead
+    // weight and should be reconsidered), and must be closed after it.
+    assert!(
+        seg_spread > 2.0,
+        "un-normalized voices only spread {seg_spread:.1} LU — has Azure started \
+         levelling its own voices, making this normalization unnecessary?"
+    );
+    assert!(
+        normed_spread < 1.5,
+        "after per-segment loudnorm the voices still spread {normed_spread:.1} LU"
+    );
+    for l in &normed_levels {
+        assert!(
+            (-23.0..=-17.0).contains(l),
+            "normalized segment at {l:.1} LUFS is outside the ACX window"
+        );
+    }
+
     // ================= assertions =================
 
     // 1. No request came close to its own budget. This is the invariant that makes the
@@ -752,4 +794,103 @@ async fn azure_voices_are_levelled_against_each_other() {
             "{l:.1} LUFS outside the ACX window"
         );
     }
+}
+
+// ------------------------------------------------- retry, observed (issue #12)
+
+/// Proves retry **fires, backs off, and stops** — deterministically and for **zero
+/// quota**, by pointing at a region that does not resolve so every attempt is a
+/// transport error.
+///
+/// A real transient cannot be summoned on demand, so observing one is luck, not a
+/// test. This asserts the machinery instead: the number of attempts, the backoff
+/// between them, and that it terminates.
+#[tokio::test]
+#[ignore = "does DNS/network (no Azure quota)"]
+async fn a_transport_failure_is_retried_a_bounded_number_of_times() {
+    use litrpg_tts::azure::{AzureConfig, retry_delay};
+
+    let cfg = AzureConfig::from_json_str(
+        r#"{"key":"not-a-real-key","tts_region":"this-region-does-not-exist-litrpg"}"#,
+    )
+    .unwrap();
+
+    // Retry disabled: one attempt, fails fast.
+    let once = AzureBackend::new(cfg.clone())
+        .with_normalize(false)
+        .with_max_attempts(1);
+    let r = req(
+        0,
+        "azure:en-GB-Ada:DragonHDLatestNeural",
+        "Hello.",
+        SpeakerKind::Narrator,
+    );
+    let t0 = std::time::Instant::now();
+    let e1 = once
+        .render(&r)
+        .await
+        .expect_err("unreachable host must fail");
+    let solo = t0.elapsed();
+    eprintln!("1 attempt:  {:.2}s  {e1}", solo.as_secs_f64());
+
+    // Retry enabled: three attempts, so at least the sum of the backoffs elapses.
+    let thrice = AzureBackend::new(cfg)
+        .with_normalize(false)
+        .with_max_attempts(3);
+    let t0 = std::time::Instant::now();
+    let e3 = thrice
+        .render(&r)
+        .await
+        .expect_err("unreachable host must still fail");
+    let retried = t0.elapsed();
+    eprintln!("3 attempts: {:.2}s  {e3}", retried.as_secs_f64());
+
+    let min_backoff = retry_delay(2) + retry_delay(3);
+    assert!(
+        retried >= min_backoff,
+        "retried in {retried:?}, less than the {min_backoff:?} of backoff — did it retry?"
+    );
+    assert!(
+        retried > solo,
+        "three attempts ({retried:?}) must take longer than one ({solo:?})"
+    );
+    // Bounded: it gave up rather than looping.
+    assert!(
+        retried < min_backoff + solo * 5 + std::time::Duration::from_secs(60),
+        "retry did not terminate promptly: {retried:?}"
+    );
+}
+
+/// A **permanent** rejection must not be retried — retrying the Ollie 400 would have
+/// tripled the cost of a guaranteed failure. Costs one short request.
+#[tokio::test]
+#[ignore = "spends a few chars of Azure quota"]
+async fn a_permanent_rejection_is_not_retried() {
+    // A voice name Azure has never heard of: the exact chapter-losing 400.
+    let r = req(
+        0,
+        "azure:en-GB-OllieMultilingual:DragonHDLatestNeural",
+        "Ready.",
+        SpeakerKind::Narrator,
+    );
+    let b = backend().with_max_attempts(3);
+
+    let t0 = std::time::Instant::now();
+    let err = b.render(&r).await.expect_err("a made-up voice must 400");
+    let wall = t0.elapsed();
+    eprintln!(
+        "permanent rejection after {:.2}s: {err}",
+        wall.as_secs_f64()
+    );
+
+    assert!(
+        matches!(err, litrpg_tts::TtsError::HttpStatus { status: 400, .. }),
+        "expected a 400, got {err:?}"
+    );
+    // No backoff was spent, which is how we know it did not retry.
+    let one_backoff = litrpg_tts::azure::retry_delay(2);
+    assert!(
+        wall < one_backoff + std::time::Duration::from_secs(20),
+        "took {wall:?} — a permanent 400 appears to have been retried"
+    );
 }

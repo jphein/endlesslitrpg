@@ -209,6 +209,60 @@ impl FromIterator<Pcm16k> for Pcm16k {
 /// suppression, and nobody gets one without asking.
 pub const DEFAULT_GAP_MS: u32 = 0;
 
+/// What happened to one segment that could not be rendered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FailedSegment {
+    /// Index within the batch, matching `RenderRequest::idx` ordering.
+    pub idx: usize,
+    /// Human-readable reason, for the log and for a retry decision.
+    pub reason: String,
+    /// Silence substituted in its place, in milliseconds.
+    pub filled_ms: u32,
+}
+
+/// Turn per-segment outcomes into a renderable chapter, substituting silence for
+/// whatever failed.
+///
+/// This is how spec §10's promise — *"chapter still renders"* — is actually kept. With
+/// request-level retry absorbing transient failures, anything reaching here is
+/// **permanent** (a voice the backend rejects), and the choice is between losing the
+/// whole chapter's audio and losing one segment's. A silent gap where the text still
+/// ships is the lesser loss, and it keeps the manifest contiguous so the watch's
+/// `segment_at_ms` and sentence highlighting keep working either side of the hole.
+///
+/// The silence is sized from the segment's own text via `audio_secs_per_char`, so
+/// timing stays roughly true and highlighting does not desynchronise across the gap.
+/// Pass [`crate::azure::MEASURED_AUDIO_SECS_PER_CHAR`] for the Azure path, or a
+/// measured equivalent.
+///
+/// Returns the buffers to assemble plus a description of every hole, so the caller can
+/// set `has_audio = false`, log precisely which segments are missing, and retry just
+/// those later.
+pub fn fill_failures_with_silence<E: core::fmt::Display>(
+    outcomes: Vec<core::result::Result<Pcm16k, E>>,
+    texts: &[&str],
+    audio_secs_per_char: f64,
+) -> (Vec<Pcm16k>, Vec<FailedSegment>) {
+    let mut pcms = Vec::with_capacity(outcomes.len());
+    let mut failures = Vec::new();
+    for (idx, outcome) in outcomes.into_iter().enumerate() {
+        match outcome {
+            Ok(pcm) => pcms.push(pcm),
+            Err(e) => {
+                let chars = texts.get(idx).map(|t| t.chars().count()).unwrap_or(0);
+                let ms = (chars as f64 * audio_secs_per_char * 1000.0).round() as u32;
+                pcms.push(Pcm16k::silence_ms(ms));
+                failures.push(FailedSegment {
+                    idx,
+                    reason: e.to_string(),
+                    filled_ms: ms,
+                });
+            }
+        }
+    }
+    (pcms, failures)
+}
+
 /// Where one segment landed in the assembled chapter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Span {

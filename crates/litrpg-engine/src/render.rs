@@ -49,6 +49,86 @@ pub struct RenderedChapter {
     pub manifest: Manifest,
 }
 
+/// Target length for one manifest entry, in characters.
+///
+/// Passed to [`litrpg_tts::azure::split_for_requests`], whose contract is "split preferring
+/// sentence boundaries, capped at this many characters". ~200 chars is a long sentence, so in
+/// practice each entry is one sentence.
+pub const SENTENCE_TARGET_CHARS: usize = 200;
+
+/// Split each speaker turn into per-sentence segments, for §9.4 sentence highlighting.
+///
+/// # Why this is the whole feature
+///
+/// The renderer synthesises one TTS call per [`PlannedSegment`], and [`assemble`] derives each
+/// entry's timings from the **measured** length of the buffer that came back. So splitting the
+/// planned segments finer is sufficient on its own: nothing downstream changes, and contiguity
+/// and `duration_ms × 32 == len` continue to hold *by construction* rather than by a second
+/// implementation that has to agree with the first.
+///
+/// Measured before this existed: live chapter 1 was 7 segments, mean 64.7 s, longest `text`
+/// 3 665 chars. A highlight sitting still for three minutes on prose that cannot fit the panel
+/// reads as broken, which is worse than no highlighting at all.
+///
+/// # What it guarantees
+///
+/// * Speaker, kind and voice are **inherited** from the turn, so the cast is untouched and one
+///   turn never becomes two voices.
+/// * `idx` is re-numbered densely from zero, so the manifest can still be built straight from it.
+/// * **No text is dropped.** A splitter returning nothing for a non-empty turn keeps the turn
+///   whole rather than losing a sentence — the same rule as the tagged-prose parser.
+/// * Idempotent: re-splitting already-split segments returns them unchanged, which is what makes
+///   the resume path safe.
+pub fn split_by_sentence(
+    planned: Vec<PlannedSegment>,
+    split: impl Fn(&str) -> Vec<String>,
+) -> Vec<PlannedSegment> {
+    let mut out: Vec<PlannedSegment> = Vec::with_capacity(planned.len());
+
+    for turn in planned {
+        let pieces: Vec<String> = split(&turn.text)
+            .into_iter()
+            .filter(|p| !p.trim().is_empty())
+            .collect();
+
+        if pieces.is_empty() {
+            // Either the turn was blank, or the splitter misbehaved. Keeping it is the
+            // conservative choice; dropping it would silently lose a line of the chapter.
+            out.push(PlannedSegment {
+                idx: out.len() as u32,
+                ..turn
+            });
+            continue;
+        }
+
+        for piece in pieces {
+            out.push(PlannedSegment {
+                idx: out.len() as u32,
+                speaker: turn.speaker.clone(),
+                kind: turn.kind,
+                voice_ref: turn.voice_ref.clone(),
+                text: piece,
+            });
+        }
+    }
+
+    out
+}
+
+/// The production splitter: aurora's sentence-preferring splitter from `litrpg-tts`.
+///
+/// Reused rather than reimplemented. Two documented divergences from true sentence splitting,
+/// both consequences of its being budget-driven:
+///
+/// * A turn already shorter than [`SENTENCE_TARGET_CHARS`] is returned whole. Harmless here —
+///   such a turn is a few seconds of audio, which is already fine highlighting granularity.
+/// * A single sentence *longer* than the target is broken on a word boundary. That is a real
+///   mid-clause seam, both audibly and for a highlight. Rare, and preferable to the alternative
+///   of an unbounded request.
+pub fn sentence_pieces(text: &str) -> Vec<String> {
+    litrpg_tts::azure::split_for_requests(text, SENTENCE_TARGET_CHARS)
+}
+
 /// Build render requests for a whole chapter, failing before any synthesis happens if a
 /// `voice_ref` is malformed (§7.3: fail at assignment time, not at render time).
 pub fn plan_requests(planned: &[PlannedSegment]) -> Result<Vec<RenderRequest>, EngineError> {
@@ -231,6 +311,244 @@ mod tests {
     #[test]
     fn word_count_sums_segment_bodies() {
         assert_eq!(word_count(&planned(3)), 6);
+    }
+
+    // -----------------------------------------------------------------------
+    // Per-sentence manifest entries (§9.4, issue #10)
+    // -----------------------------------------------------------------------
+
+    /// A deterministic splitter, so the plumbing is tested independently of the splitter's
+    /// heuristics. The real one is covered by `sentence_pieces_*` below.
+    fn on_pipe(text: &str) -> Vec<String> {
+        text.split('|').map(|s| s.trim().to_string()).collect()
+    }
+
+    fn turn(idx: u32, speaker: &str, kind: SpeakerKind, voice: &str, text: &str) -> PlannedSegment {
+        PlannedSegment {
+            idx,
+            speaker: speaker.to_string(),
+            kind,
+            voice_ref: voice.to_string(),
+            text: text.to_string(),
+        }
+    }
+
+    #[test]
+    fn splitting_inherits_speaker_kind_and_voice() {
+        let out = split_by_sentence(
+            vec![turn(
+                0,
+                "Kaelen",
+                SpeakerKind::Character,
+                "azure:m1",
+                "One.|Two.|Three.",
+            )],
+            on_pipe,
+        );
+        assert_eq!(out.len(), 3);
+        for (i, s) in out.iter().enumerate() {
+            assert_eq!(s.idx, i as u32, "indices must be dense and zero-based");
+            assert_eq!(
+                s.speaker, "Kaelen",
+                "one turn must never become two speakers"
+            );
+            assert_eq!(s.kind, SpeakerKind::Character);
+            assert_eq!(
+                s.voice_ref, "azure:m1",
+                "one turn must never become two voices"
+            );
+        }
+        assert_eq!(
+            out.iter().map(|s| s.text.as_str()).collect::<Vec<_>>(),
+            vec!["One.", "Two.", "Three."]
+        );
+    }
+
+    #[test]
+    fn indices_stay_dense_across_several_turns() {
+        let out = split_by_sentence(
+            vec![
+                turn(0, "narrator", SpeakerKind::Narrator, "v0", "A.|B."),
+                turn(1, "Kaelen", SpeakerKind::Character, "v1", "C."),
+                turn(2, "SYSTEM", SpeakerKind::System, "v2", "D.|E.|F."),
+            ],
+            on_pipe,
+        );
+        assert_eq!(out.len(), 6);
+        assert_eq!(
+            out.iter().map(|s| s.idx).collect::<Vec<_>>(),
+            vec![0, 1, 2, 3, 4, 5]
+        );
+        assert_eq!(out[2].speaker, "Kaelen");
+        assert_eq!(out[3].kind, SpeakerKind::System);
+    }
+
+    #[test]
+    fn no_text_is_dropped_by_splitting() {
+        let turns = vec![
+            turn(
+                0,
+                "narrator",
+                SpeakerKind::Narrator,
+                "v",
+                "The vale.|Ash fell.",
+            ),
+            turn(1, "Kaelen", SpeakerKind::Character, "v", "\"Pay up.\""),
+        ];
+        let joined_before: String = turns
+            .iter()
+            .flat_map(|t| t.text.split('|'))
+            .map(str::trim)
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        let out = split_by_sentence(turns, on_pipe);
+        let joined_after = out
+            .iter()
+            .map(|s| s.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(joined_after, joined_before);
+    }
+
+    #[test]
+    fn a_splitter_returning_nothing_keeps_the_turn_whole() {
+        // Losing a line of the chapter to a splitter bug would be silent, so the conservative
+        // branch has to be the one that keeps text.
+        let out = split_by_sentence(
+            vec![turn(
+                0,
+                "Kaelen",
+                SpeakerKind::Character,
+                "v",
+                "Something was said.",
+            )],
+            |_| Vec::new(),
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].text, "Something was said.");
+    }
+
+    #[test]
+    fn blank_pieces_are_discarded() {
+        let out = split_by_sentence(
+            vec![turn(
+                0,
+                "Kaelen",
+                SpeakerKind::Character,
+                "v",
+                "One.||  |Two.",
+            )],
+            on_pipe,
+        );
+        assert_eq!(
+            out.len(),
+            2,
+            "empty pieces would render as silence: {out:?}"
+        );
+    }
+
+    #[test]
+    fn splitting_is_idempotent_so_a_resume_is_safe() {
+        let once = split_by_sentence(
+            vec![turn(0, "narrator", SpeakerKind::Narrator, "v", "A.|B.|C.")],
+            on_pipe,
+        );
+        let twice = split_by_sentence(once.clone(), on_pipe);
+        assert_eq!(
+            once, twice,
+            "re-splitting stored segments must change nothing"
+        );
+    }
+
+    #[test]
+    fn an_empty_chapter_splits_to_nothing() {
+        assert!(split_by_sentence(Vec::new(), on_pipe).is_empty());
+    }
+
+    /// The measured problem, end to end: a long narration turn becomes many entries, and the
+    /// assembled manifest is still contiguous with exact byte arithmetic.
+    #[test]
+    fn a_split_chapter_still_satisfies_the_manifest_invariant() {
+        let long = (0..12)
+            .map(|i| format!("Sentence number {i}."))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let turns = vec![turn(0, "narrator", SpeakerKind::Narrator, "v", &long)];
+
+        let split = split_by_sentence(turns, sentence_pieces);
+        assert!(
+            split.len() > 1,
+            "a 12-sentence turn must not stay one entry"
+        );
+
+        let parts: Vec<Pcm16k> = split
+            .iter()
+            .enumerate()
+            .map(|(i, _)| Pcm16k::silence_ms(40 + i as u32))
+            .collect();
+        let r = assemble(1, &split, parts).unwrap();
+
+        assert!(r.manifest.is_contiguous());
+        assert_eq!(r.pcm.len() as u32, r.manifest.duration_ms * BYTES_PER_MS);
+        assert_eq!(r.manifest.segments.len(), split.len());
+        // Every entry is short enough to highlight usefully.
+        for s in &r.manifest.segments {
+            assert!(
+                s.duration_ms() < 1_000,
+                "entry {} is too long to highlight",
+                s.idx
+            );
+        }
+    }
+
+    // The real splitter's behaviour on the shapes prose actually contains.
+    #[test]
+    fn sentence_pieces_does_not_shatter_dialogue() {
+        let text = "\"Pay up,\" he said. \"Or I take the ledger.\" Kaelen did not move.";
+        let pieces = sentence_pieces(&text.repeat(4));
+        assert!(
+            pieces.iter().all(|p| !p.trim().is_empty()),
+            "no empty pieces: {pieces:?}"
+        );
+        // The comma inside the quotation must not end a sentence.
+        assert!(
+            !pieces.iter().any(|p| p.trim() == "\"Pay up,\""),
+            "dialogue was shattered at the comma: {pieces:?}"
+        );
+    }
+
+    #[test]
+    fn sentence_pieces_keeps_a_decimal_intact() {
+        // "4.200" must not split, which is why the splitter requires whitespace after a
+        // terminator.
+        let text = "He owed 4.200 marks and a debt of honour. ".repeat(12);
+        let pieces = sentence_pieces(&text);
+        assert!(
+            !pieces.iter().any(|p| p.trim().ends_with("4.")),
+            "a decimal was split: {pieces:?}"
+        );
+    }
+
+    #[test]
+    fn sentence_pieces_never_loses_characters() {
+        let text = "One. Two! Three? \"Four.\" Five... Six. ".repeat(10);
+        let pieces = sentence_pieces(&text);
+        let rejoined: String = pieces
+            .join(" ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let original: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert_eq!(rejoined, original, "the splitter must be lossless");
+    }
+
+    #[test]
+    fn a_short_turn_is_left_whole() {
+        // Documented divergence from true sentence splitting: harmless, because a turn under the
+        // target is a few seconds of audio and already fine to highlight.
+        let pieces = sentence_pieces("Short. Two sentences.");
+        assert_eq!(pieces, vec!["Short. Two sentences."]);
     }
 
     #[test]

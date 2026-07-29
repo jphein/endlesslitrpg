@@ -78,6 +78,16 @@ Kaelen is a debt-collector for a dead god, working the Ashen Vale where the god'
 contracts still hold. Grim, dry, close third person, past tense. His associate Sera watches \
 the exits and says the thing he does not want to hear.";
 
+/// # Non-deterministic by nature; an occasional failure is not automatically a regression.
+///
+/// Observed failing once on 2026-07-29 and passing on the runs either side, with the assertion
+/// not captured. Pass 1 samples at temperature 0.9 and pass 2 is a live model, so the number of
+/// speakers, the deltas proposed and the gender hints all vary run to run.
+///
+/// Every assertion here names the offending value, so **read the panic before assuming the
+/// pipeline broke** — and if it fails, capture the message, because it has not been seen yet.
+/// The invariants that must never vary are the arithmetic ones: contiguous segments,
+/// `duration_ms × 32 == len` against the bytes on disk, and the cast agreeing with itself.
 #[tokio::test]
 #[ignore = "costs GPU time on familiar and Azure credit"]
 async fn one_real_chapter_end_to_end() {
@@ -149,6 +159,7 @@ async fn one_real_chapter_end_to_end() {
         // against what Azure actually advertises.
         voice_genders: registry_genders(&registry),
         renderable_backends: registry.ids().iter().map(|s| s.to_string()).collect(),
+        sentence_manifest: true,
         summary_window: 5,
     };
 
@@ -534,6 +545,7 @@ async fn a_second_cycle_never_rewrites_published_prose() {
             character_voices: AZURE_CHARACTERS.iter().map(|s| s.to_string()).collect(),
             voice_genders: Default::default(),
             renderable_backends: vec!["azure".to_string()],
+            sentence_manifest: true,
             summary_window: 5,
         },
     );
@@ -620,4 +632,132 @@ fn ember_config() -> litrpg_config::Config {
         ember_model: litrpg_ember::DEFAULT_MODEL.to_string(),
         ..Default::default()
     }
+}
+
+/// Report the cost of per-sentence manifest entries against the **live** story (issue #10).
+///
+/// Reads the configured database rather than generating anything, so it costs nothing and is
+/// repeatable. Deliberately needs `data/`, which the familiar build excludes — run it locally:
+///
+/// ```text
+/// LITRPG_CONFIG=./litrpg.toml cargo test -p litrpg-engine --test live_end_to_end \
+///     -- --ignored --nocapture measure_sentence_manifest
+/// ```
+#[tokio::test]
+#[ignore = "reads the live story database; run locally with $LITRPG_CONFIG set"]
+async fn measure_sentence_manifest_cost() {
+    init_logging();
+    let config = litrpg_config::Config::load().expect("set LITRPG_CONFIG");
+    let store = Store::open(&config.db_path).expect("open store");
+
+    println!(
+        "\n{:<5} {:>6} {:>8} {:>9} {:>9} {:>10} {:>7} {:>10}",
+        "ch", "turns", "entries", "ratio", "max turn", "max entry", "json", "mid-clause"
+    );
+    let mut worst_short: Vec<String> = Vec::new();
+    for row in store.chapters_since(0).expect("chapters") {
+        if !row.has_audio {
+            continue;
+        }
+        let turns: Vec<litrpg_engine::PlannedSegment> = store
+            .segments(row.number)
+            .expect("segments")
+            .into_iter()
+            .map(|s| litrpg_engine::PlannedSegment {
+                idx: s.idx,
+                speaker: s.speaker,
+                kind: s.kind,
+                voice_ref: s.voice_ref,
+                text: s.text,
+            })
+            .collect();
+        if turns.is_empty() {
+            continue;
+        }
+
+        let max_turn = turns
+            .iter()
+            .map(|t| t.text.chars().count())
+            .max()
+            .unwrap_or(0);
+        let split = litrpg_engine::split_by_sentence(turns.clone(), litrpg_engine::sentence_pieces);
+        let max_entry = split
+            .iter()
+            .map(|t| t.text.chars().count())
+            .max()
+            .unwrap_or(0);
+
+        // Manifest size with plausible timings; only the field count and text lengths matter.
+        let segments: Vec<litrpg_core::Segment> = split
+            .iter()
+            .enumerate()
+            .map(|(i, p)| litrpg_core::Segment {
+                idx: p.idx,
+                speaker: p.speaker.clone(),
+                kind: p.kind,
+                voice_ref: p.voice_ref.clone(),
+                text: p.text.clone(),
+                start_ms: i as u32 * 3_000,
+                end_ms: (i as u32 + 1) * 3_000,
+            })
+            .collect();
+        let json = serde_json::to_string(&litrpg_core::Manifest::new(row.number, segments))
+            .expect("serialize")
+            .len();
+
+        // An entry not ending in sentence punctuation was cut on a word boundary, because the
+        // sentence itself exceeded the target. That is the one place the split lands mid-clause,
+        // which is audible at the join and makes a highlight jump mid-sentence — so it is the
+        // number that decides whether a true sentence splitter is needed.
+        let mid_clause = split
+            .iter()
+            .filter(|p| {
+                !p.text
+                    .trim_end()
+                    .ends_with(['.', '!', '?', '"', '\'', '”', '’', ')', ']', '—'])
+            })
+            .count();
+
+        println!(
+            "{:<5} {:>6} {:>8} {:>8.1}x {:>9} {:>10} {:>6}K {:>6} ({:>4.1}%)",
+            row.number,
+            turns.len(),
+            split.len(),
+            split.len() as f64 / turns.len() as f64,
+            max_turn,
+            max_entry,
+            json / 1024,
+            mid_clause,
+            100.0 * mid_clause as f64 / split.len() as f64
+        );
+
+        // An entry of a few characters is the abbreviation symptom: "Mr." or "St." ends a
+        // sentence as far as the splitter is concerned, so it becomes an entry of its own — a
+        // fraction of a second of audio and a highlight flicker.
+        worst_short.extend(
+            split
+                .iter()
+                .filter(|p| p.text.trim().chars().count() <= 12)
+                .map(|p| format!("ch{}: {:?}", row.number, p.text.trim())),
+        );
+
+        // The point of the exercise: no entry may be too long to highlight.
+        assert!(
+            max_entry <= litrpg_engine::SENTENCE_TARGET_CHARS.max(max_turn),
+            "chapter {} still has a {max_entry}-char entry",
+            row.number
+        );
+    }
+    if worst_short.is_empty() {
+        println!("\nno suspiciously short entries — no abbreviation splits observed");
+    } else {
+        println!(
+            "\n{} short entries (abbreviation splits):",
+            worst_short.len()
+        );
+        for e in worst_short.iter().take(12) {
+            println!("  {e}");
+        }
+    }
+    println!();
 }

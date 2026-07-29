@@ -1,6 +1,10 @@
 //! SQLite persistence. The only crate in the workspace that writes state.
 
+pub mod chapters;
+pub mod ledger;
 pub mod migrations;
+
+pub use chapters::{ChapterRow, NewChapter};
 
 use rusqlite::Connection;
 use thiserror::Error;

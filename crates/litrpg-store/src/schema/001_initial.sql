@@ -56,9 +56,12 @@ CREATE TABLE lore (
     updated_chapter INTEGER NOT NULL DEFAULT 0
 );
 
+-- `chapter` is the chapter *number*, which is UNIQUE in chapters. There is
+-- deliberately no chapter_id FK here: a rewind must be able to deactivate ledger
+-- rows for chapters that have since been deleted, so the ledger does not depend
+-- on a chapter row still existing.
 CREATE TABLE ledger (
     id         INTEGER PRIMARY KEY,
-    chapter_id INTEGER,
     chapter    INTEGER NOT NULL,
     seq        INTEGER NOT NULL UNIQUE,
     subject    TEXT    NOT NULL,

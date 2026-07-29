@@ -992,6 +992,10 @@ fn a_player_that_exits_nonzero_is_reported_with_its_status() {
 
 // ------------------------------------------------- derived media paths
 
+// These two tests now pin `litrpg_core::artifact`'s behaviour *through this call
+// site*, which is the version worth having: they fail if core changes the convention
+// or if `play` stops asking core for it.
+
 #[test]
 fn media_paths_are_derived_zero_padded_from_the_chapter_number() {
     let dir = std::path::Path::new("/srv/litrpg/media");
@@ -1011,14 +1015,20 @@ fn media_paths_are_derived_zero_padded_from_the_chapter_number() {
 }
 
 #[test]
-fn the_derived_names_match_what_the_daemon_serves() {
-    // The daemon builds `/media/{:04}.mp3` from its own literal. If these ever
-    // disagree, `litrpg play` and the watch would fetch different files.
-    for n in [1u32, 9, 10, 99, 100, 1000, 9999] {
+fn the_derived_name_is_the_one_core_defines() {
+    // Compared against `litrpg_core::artifact`, not against a local `format!` — a
+    // literal on both sides of an equality only proves the literal. The daemon serves
+    // and the engine writes the same names from the same source, so agreement here is
+    // agreement everywhere.
+    for n in [1u32, 9, 10, 99, 100, 1000, 9999, 10_000, 12_345] {
         let derived = play::media_path(std::path::Path::new("/m"), n, "mp3");
         assert_eq!(
             derived.file_name().unwrap().to_str().unwrap(),
-            format!("{n:04}.mp3")
+            litrpg_core::artifact::mp3_name(n)
+        );
+        assert_eq!(
+            derived,
+            std::path::Path::new("/m").join(litrpg_core::artifact::media_name(n, "mp3"))
         );
     }
 }

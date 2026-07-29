@@ -94,16 +94,16 @@ pub fn players() -> Vec<Player> {
     ]
 }
 
-/// Zero-padded artifact filename for a chapter: `0042.mp3` (spec §8).
+/// Full path to a chapter artifact: `media_dir` + `0042.mp3` (spec §8).
 ///
-/// **This convention is currently written out in six places** — the engine's
-/// `path_for`, five literals across the daemon's chapter and feed handlers, and here.
-/// Nothing forces them to agree, which is the same shape as `content_hash` before it
-/// was hoisted into `litrpg-core`. It should live there too; §8 gives it three
-/// consumers (engine writes, daemon serves, CLI plays), which is precisely the
-/// argument that put `Manifest` in core.
+/// The filename comes from `litrpg_core::artifact`, which owns the convention. It used
+/// to be spelled out here as a sixth copy of `{chapter:04}.{ext}`; a name that the
+/// engine writes, the daemon serves and this plays needs exactly one owner, or the day
+/// they disagree is the day audio silently fetches the wrong file.
+///
+/// This function stays because joining is the CLI's concern and the name is core's.
 pub fn media_path(media_dir: &Path, chapter: u32, ext: &str) -> PathBuf {
-    media_dir.join(format!("{chapter:04}.{ext}"))
+    media_dir.join(litrpg_core::artifact::media_name(chapter, ext))
 }
 
 /// Whether `cmd` is an executable reachable from `path_env`.

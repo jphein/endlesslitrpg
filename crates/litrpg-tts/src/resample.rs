@@ -209,6 +209,21 @@ impl FfmpegPostProcessor {
         args
     }
 
+    /// Loudness-normalize an **already 16 kHz** buffer, with no resample.
+    ///
+    /// This is the seam the Azure path needs: Azure serves 16 kHz natively, so it
+    /// never goes through `process()` — and consequently was never normalized at all.
+    /// Measured 2026-07-29 on a real chapter, `en-US-Steffan` came back **4.9 LU
+    /// quieter than `en-GB-Ada`**, an audible step at every narrator/SYSTEM
+    /// transition. Same defect class as the 4.1 LU spread Reverie found across the
+    /// sherpa engines; it just had no owner on the Azure side.
+    pub fn normalize_16k(&self, pcm: &Pcm16k) -> Result<Pcm16k> {
+        if pcm.is_empty() {
+            return Ok(Pcm16k::empty());
+        }
+        Ok(Pcm16k::new(self.apply_loudnorm(pcm.as_bytes())?)?.padded_to_whole_ms())
+    }
+
     /// Stage 2: normalize an already-resampled 16 kHz stream.
     fn apply_loudnorm(&self, pcm16k: &[u8]) -> Result<Vec<u8>> {
         if self.loudnorm_two_pass {

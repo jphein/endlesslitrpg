@@ -13,6 +13,7 @@
 use crate::backend::{Availability, CostClass, Gender, RenderRequest, TtsBackend, VoiceDesc};
 use crate::error::{Result, TtsError};
 use crate::pcm::Pcm16k;
+use crate::resample::FfmpegPostProcessor;
 use async_trait::async_trait;
 use serde::Deserialize;
 use std::path::PathBuf;
@@ -698,6 +699,20 @@ pub struct AzureBackend {
     fallback_on_reject: bool,
     /// Largest text one request may carry. Defaults to [`MAX_CHARS_PER_REQUEST`].
     max_chars_per_request: usize,
+    /// Loudness-normalize each rendered segment. **On by default.**
+    ///
+    /// Azure serves 16 kHz natively, so this path skips the resampler entirely — and
+    /// as a result carried no normalization at all until measured. On a real chapter
+    /// `en-US-Steffan` came back **4.9 LU quieter than `en-GB-Ada`** (−25.1 vs −20.3
+    /// LUFS), a plainly audible step at every narrator/SYSTEM transition. That is the
+    /// same defect Reverie found across the sherpa engines, which is why `loudnorm` is
+    /// unconditional there; it simply had no owner here.
+    ///
+    /// Applied **per segment**, after a split segment's requests are concatenated, so
+    /// it levels voices against each other without disturbing chunk joins (measured
+    /// at 0.1–0.7 LU, i.e. already inaudible).
+    normalize: bool,
+    post: FfmpegPostProcessor,
 }
 
 impl AzureBackend {
@@ -718,7 +733,22 @@ impl AzureBackend {
             voices,
             fallback_on_reject: false,
             max_chars_per_request: MAX_CHARS_PER_REQUEST,
+            normalize: true,
+            post: FfmpegPostProcessor::default(),
         }
+    }
+
+    /// Turn per-segment loudness normalization off. Only sensible where `ffmpeg` is
+    /// unavailable and a 4.9 LU step between voices is acceptable.
+    #[must_use]
+    pub fn with_normalize(mut self, enabled: bool) -> Self {
+        self.normalize = enabled;
+        self
+    }
+
+    /// Whether rendered segments are loudness-normalized.
+    pub fn normalize(&self) -> bool {
+        self.normalize
     }
 
     /// Override the per-request text budget. Lower it if Azure throughput degrades;
@@ -962,7 +992,17 @@ impl AzureBackend {
             sub.text = part.clone();
             out.extend(&self.render_attempt(&sub).await?);
         }
-        Ok(out.padded_to_whole_ms())
+        let out = out.padded_to_whole_ms();
+        if !self.normalize || out.is_empty() {
+            return Ok(out);
+        }
+        // Per segment, not per request: normalizing each request independently would
+        // introduce a level step at chunk joins that measurement shows is currently
+        // absent (0.1-0.7 LU).
+        let post = self.post.clone();
+        tokio::task::spawn_blocking(move || post.normalize_16k(&out))
+            .await
+            .map_err(|e| TtsError::Worker(e.to_string()))?
     }
 
     /// One request for one already-budgeted piece of text, with the voice-rejection
@@ -1046,10 +1086,18 @@ impl TtsBackend for AzureBackend {
 
     fn available(&self) -> Availability {
         if self.config.key.is_empty() {
-            Availability::missing("no Azure subscription key resolved")
-        } else {
-            Availability::Ready
+            return Availability::missing("no Azure subscription key resolved");
         }
+        // Reported rather than silently skipped: a chapter with a 4.9 LU step between
+        // voices is a defect, and quietly degrading to it is how it stayed unnoticed.
+        if self.normalize && !self.post.is_available() {
+            return Availability::missing(
+                "ffmpeg not runnable; needed to level Azure voices against each other \
+                 (disable with AzureBackend::with_normalize(false))"
+                    .to_string(),
+            );
+        }
+        Availability::Ready
     }
 
     fn voices(&self) -> Vec<VoiceDesc> {
@@ -1180,6 +1228,8 @@ impl AzureBackend {
             voices: Vec::new(),
             fallback_on_reject: self.fallback_on_reject,
             max_chars_per_request: self.max_chars_per_request,
+            normalize: self.normalize,
+            post: self.post.clone(),
         }
     }
 }

@@ -695,3 +695,61 @@ async fn full_length_chapter_chunk_report() {
         assert!(peak(p) > 500, "segment {i} silent");
     }
 }
+
+/// Verifies the per-segment normalization that closes the **4.9 LU step between Azure
+/// voices** found by the full-chapter report. Deliberately cheap (~400 chars): the
+/// defect is per-voice level, which two short renders show as well as two long ones.
+#[tokio::test]
+#[ignore = "spends ~400 chars of Azure quota"]
+async fn azure_voices_are_levelled_against_each_other() {
+    // The exact pair that stepped: narrator Ada vs SYSTEM Steffan.
+    let pair = [
+        ("en-GB-Ada:DragonHDLatestNeural", SpeakerKind::Narrator),
+        ("en-US-Steffan:DragonHDLatestNeural", SpeakerKind::System),
+    ];
+    let text = "The seal on the door pulsed once, and the crack widened by a finger's width.";
+
+    let mut raw = Vec::new();
+    let mut normed = Vec::new();
+    for (voice, kind) in pair {
+        let r = req(0, &format!("azure:{voice}"), text, kind);
+        let a = backend().with_normalize(false).render(&r).await.unwrap();
+        let b = backend().render(&r).await.unwrap(); // normalize is the default
+        let (la, lb) = (
+            lufs(&a, "raw").expect("ebur128"),
+            lufs(&b, "norm").expect("ebur128"),
+        );
+        eprintln!("{voice:<40} raw {la:>6.1} -> normalized {lb:>6.1} LUFS");
+        raw.push(la);
+        normed.push(lb);
+        assert!(
+            b.is_whole_ms(),
+            "normalization must preserve the byte contract"
+        );
+        assert_eq!(b.len() as u32, b.duration_ms() * 32);
+        assert!(peak(&b) > 500, "normalized output is silent");
+    }
+
+    let raw_step = (raw[0] - raw[1]).abs();
+    let norm_step = (normed[0] - normed[1]).abs();
+    eprintln!("per-voice step: raw {raw_step:.1} LU -> normalized {norm_step:.1} LU");
+
+    // The defect reproduces without normalization...
+    assert!(
+        raw_step > 2.0,
+        "expected the un-normalized voices to step by >2 LU (measured 4.9); got \
+         {raw_step:.1} LU — has Azure changed, making this normalization unnecessary?"
+    );
+    // ...and normalization closes it below the ~1 LU just-noticeable difference.
+    assert!(
+        norm_step < 1.0,
+        "normalized voices still step by {norm_step:.1} LU, at or above the JND"
+    );
+    // Both land in the ACX window.
+    for l in &normed {
+        assert!(
+            (-23.0..=-17.0).contains(l),
+            "{l:.1} LUFS outside the ACX window"
+        );
+    }
+}

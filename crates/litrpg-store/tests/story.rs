@@ -166,7 +166,9 @@ fn upsert_preserves_the_playback_cursor() {
     store.upsert_story(&new_story("Endless", "Kaelen")).unwrap();
     store.set_consumed_through(12).unwrap();
 
-    store.upsert_story(&new_story("The Ashen Ledger", "Kaelen Vord")).unwrap();
+    store
+        .upsert_story(&new_story("The Ashen Ledger", "Kaelen Vord"))
+        .unwrap();
 
     let s = store.story().unwrap().unwrap();
     assert_eq!(s.title, "The Ashen Ledger");

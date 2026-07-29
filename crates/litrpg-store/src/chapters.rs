@@ -38,8 +38,6 @@ pub struct ChapterRow {
     pub title: String,
     pub text_md: String,
     pub prompt_hash: String,
-    pub pcm_path: Option<String>,
-    pub mp3_path: Option<String>,
     pub duration_ms: u32,
     pub has_audio: bool,
     pub state_dirty: bool,
@@ -72,16 +70,15 @@ impl Store {
             title: r.get(1)?,
             text_md: r.get(2)?,
             prompt_hash: r.get(3)?,
-            pcm_path: r.get(4)?,
-            mp3_path: r.get(5)?,
-            duration_ms: r.get::<_, i64>(6)? as u32,
-            has_audio: r.get::<_, i64>(7)? != 0,
-            state_dirty: r.get::<_, i64>(8)? != 0,
-            created_at: r.get(9)?,
+            duration_ms: r.get::<_, i64>(4)? as u32,
+            has_audio: r.get::<_, i64>(5)? != 0,
+            state_dirty: r.get::<_, i64>(6)? != 0,
+            created_at: r.get(7)?,
         })
     }
 
-    const CHAPTER_COLUMNS: &'static str = "number, title, text_md, prompt_hash, pcm_path, mp3_path, duration_ms, has_audio, state_dirty, created_at";
+    const CHAPTER_COLUMNS: &'static str =
+        "number, title, text_md, prompt_hash, duration_ms, has_audio, state_dirty, created_at";
 
     pub fn chapter(&self, number: u32) -> Result<ChapterRow> {
         let sql = format!(
@@ -137,8 +134,6 @@ impl Store {
         &self,
         number: u32,
         manifest: &Manifest,
-        pcm_path: &str,
-        mp3_path: &str,
     ) -> Result<()> {
         // Guard the invariant at the write boundary rather than trusting the caller.
         // Clients derive Range offsets from these segments, so a non-contiguous
@@ -178,10 +173,9 @@ impl Store {
 
         self.conn.execute(
             "UPDATE chapters
-             SET manifest_json = ?1, pcm_path = ?2, mp3_path = ?3,
-                 duration_ms = ?4, has_audio = 1
-             WHERE id = ?5",
-            params![json, pcm_path, mp3_path, manifest.duration_ms, chapter_id],
+             SET manifest_json = ?1, duration_ms = ?2, has_audio = 1
+             WHERE id = ?3",
+            params![json, manifest.duration_ms, chapter_id],
         )?;
 
         self.conn.execute(

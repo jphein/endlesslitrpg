@@ -37,7 +37,7 @@ fn store_with_chapter() -> Store {
 fn accepts_a_contiguous_manifest() {
     let store = store_with_chapter();
     let m = Manifest::new(1, vec![seg(0, 0, 4120), seg(1, 4120, 9000)]);
-    assert!(store.attach_audio(1, &m, "0001.pcm", "0001.mp3").is_ok());
+    assert!(store.attach_audio(1, &m).is_ok());
     assert_eq!(store.chapter(1).unwrap().duration_ms, 9000);
 }
 
@@ -47,7 +47,7 @@ fn rejects_a_gap_between_segments() {
     // 100..150 is a hole: every later byte offset would address the wrong audio.
     let m = Manifest::new(1, vec![seg(0, 0, 100), seg(1, 150, 200)]);
     let err = store
-        .attach_audio(1, &m, "0001.pcm", "0001.mp3")
+        .attach_audio(1, &m)
         .unwrap_err();
     assert!(err.to_string().contains("not contiguous"), "{err}");
 
@@ -62,7 +62,7 @@ fn rejects_segments_that_do_not_start_at_zero() {
     let store = store_with_chapter();
     let m = Manifest::new(1, vec![seg(0, 40, 100)]);
     let err = store
-        .attach_audio(1, &m, "0001.pcm", "0001.mp3")
+        .attach_audio(1, &m)
         .unwrap_err();
     assert!(err.to_string().contains("not contiguous"), "{err}");
 }
@@ -74,7 +74,7 @@ fn rejects_duration_disagreeing_with_the_last_segment() {
     // Simulate a caller that computed duration from predicted rather than final PCM.
     m.duration_ms = 4096;
     let err = store
-        .attach_audio(1, &m, "0001.pcm", "0001.mp3")
+        .attach_audio(1, &m)
         .unwrap_err();
     assert!(err.to_string().contains("disagrees"), "{err}");
 }
@@ -85,7 +85,7 @@ fn an_empty_manifest_is_acceptable() {
     // even when TTS fails); it must not be conflated with a corrupt manifest.
     let store = store_with_chapter();
     let m = Manifest::new(1, vec![]);
-    assert!(store.attach_audio(1, &m, "0001.pcm", "0001.mp3").is_ok());
+    assert!(store.attach_audio(1, &m).is_ok());
     assert_eq!(store.chapter(1).unwrap().duration_ms, 0);
 }
 

@@ -100,9 +100,21 @@ impl Store {
         Ok(())
     }
 
+    /// The domain tables.
+    ///
+    /// Excludes SQLite's own bookkeeping and anything prefixed `_`, which is the
+    /// convention here for internal tables a migration leaves behind — migration 004
+    /// preserves the media paths it dropped in `_audit_004_paths`, because the
+    /// stale-path bug that motivated the drop was diagnosable *precisely* because
+    /// those values were on record. Without this filter every such migration would
+    /// churn a test that is really asking "do the domain tables exist".
+    ///
+    /// `substr(name, 1, 1)` rather than `NOT LIKE '_%'` because `_` is a LIKE
+    /// wildcard, so the obvious spelling would exclude every table.
     pub fn table_names(&self) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+            "SELECT name FROM sqlite_master
+             WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND substr(name, 1, 1) <> '_'",
         )?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)

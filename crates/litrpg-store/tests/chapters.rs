@@ -49,7 +49,7 @@ fn attaching_audio_persists_manifest_segments_and_duration() {
     let store = Store::open_in_memory().unwrap();
     store.insert_chapter(&new_chapter(1)).unwrap();
     store
-        .attach_audio(1, &manifest(1), "media/0001.pcm", "media/0001.mp3")
+        .attach_audio(1, &manifest(1))
         .unwrap();
 
     let ch = store.chapter(1).unwrap();
@@ -68,10 +68,10 @@ fn attaching_audio_twice_replaces_rather_than_duplicates_segments() {
     let store = Store::open_in_memory().unwrap();
     store.insert_chapter(&new_chapter(1)).unwrap();
     store
-        .attach_audio(1, &manifest(1), "a.pcm", "a.mp3")
+        .attach_audio(1, &manifest(1))
         .unwrap();
     store
-        .attach_audio(1, &manifest(1), "b.pcm", "b.mp3")
+        .attach_audio(1, &manifest(1))
         .unwrap();
     assert_eq!(store.segments(1).unwrap().len(), 1);
 }

@@ -167,7 +167,7 @@ fn chapters_missing_audio_lists_only_the_silent_ones() {
             end_ms: 1000,
         }],
     );
-    s.attach_audio(2, &m, "0002.pcm", "0002.mp3").unwrap();
+    s.attach_audio(2, &m).unwrap();
 
     assert_eq!(s.chapters_missing_audio().unwrap(), vec![1, 3]);
 }

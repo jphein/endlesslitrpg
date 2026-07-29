@@ -288,6 +288,33 @@ what the technique cannot find: grepping for a duplicated **literal** catches `{
 `"narrator"`, and would never have found the prompt-hash instance, because "config path resolution"
 is not a string.
 
+The sixth instance was `voice_ref`. It is derived state owned by the `cast` table, with a copy on
+every `segments` row and nothing forcing them to match — and the resumed-render path read the copy.
+It crossed no crate boundary and no language boundary; both copies were plain Rust in one function.
+What hid it was that **the copies agreed for every chapter rendered correctly**, so the disagreement
+only existed in the chapters that needed repair. Add to the heuristic: a duplicated value whose
+copies diverge *only in the failure case* is invisible to every test that starts from a healthy
+fixture.
+
+### 5.5 What a passing test cannot see
+
+Four separate wording and advice defects reached a green suite: a stale-heartbeat line reading
+"longer than the 15 min **ago** it is allowed" (an age formatter reused for a duration), and three
+others of the same kind. Every assertion passed. The sentences were still wrong.
+
+> Assertions catch **missing** output. Only reading the output catches **wrong** output.
+
+This is the same family as §5.3 — both are about what a test can and cannot observe. An assertion
+encodes a property someone thought to check; prose that is grammatical, well-formed, present in the
+right field, and *misleading* satisfies every such property. So a command whose output is advice
+gets read by a human at least once, out loud if necessary, however green the suite is.
+
+The corollary bit us the same day, one level up. Re-rendering chapters 1, 2 and 5 restored the
+correct narrator and "proved" the recovery path worked; chapters 3 and 4, the only two that were
+broken, reproduced the substitution. **A test of a recovery path must start from the broken state.**
+Exercising it from a healthy fixture passes trivially and proves nothing — and it will keep passing
+while the recovery recovers nothing.
+
 ---
 
 ## 6. Data model

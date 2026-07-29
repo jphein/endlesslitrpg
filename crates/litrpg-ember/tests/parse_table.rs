@@ -151,6 +151,75 @@ fn narrator_and_narration_merge_into_one_speaker() {
     assert_eq!(segs[0].speaker, "narrator");
 }
 
+/// Measured live 2026-07-29: Ember emitted `[narraraor]`. It was cast as a **character**,
+/// drew a character voice, and — because `cast` is permanent — would have gone on reading
+/// narration in that voice for the rest of the serial.
+///
+/// An alias list cannot catch a typo, so a near-miss of a role tag is treated as that role.
+/// The tag namespace is structural, not free text: the model is choosing between two role
+/// words and a character name, and a word two edits from `narrator` is not a person.
+#[test]
+fn a_typo_in_a_role_tag_is_still_that_role() {
+    for typo in ["narraraor", "narrater", "narrato", "narratorr", "naarrator"] {
+        let segs = parse_tagged_prose(&format!("[{typo}] Ash fell."));
+        assert_eq!(
+            shape(&segs),
+            vec![("narrator", SpeakerKind::Narrator, "Ash fell.")],
+            "[{typo}] must resolve to the narrator, not mint a cast member"
+        );
+    }
+
+    for typo in ["sytem", "systm", "sysem", "SYSTM"] {
+        let segs = parse_tagged_prose(&format!("[{typo}] HP 41/60."));
+        assert_eq!(
+            shape(&segs),
+            vec![("SYSTEM", SpeakerKind::System, "HP 41/60.")],
+            "[{typo}] must resolve to SYSTEM"
+        );
+    }
+}
+
+/// The other half of the trade: fuzzy matching must not swallow real names.
+#[test]
+fn character_names_are_not_absorbed_by_fuzzy_role_matching() {
+    for name in [
+        "Kaelen",
+        "Sera",
+        "Sera Vane",
+        "Joryn",
+        "Ilex",
+        "Nara",
+        "Narran",
+        "Nadia",
+        "Syl",
+        "Sylvane",
+        "Naia",
+        "Nyx",
+        "System Lord",
+        "The Narrator's Widow",
+    ] {
+        let segs = parse_tagged_prose(&format!("[{name}] \"Mine.\""));
+        assert_eq!(
+            segs[0].kind,
+            SpeakerKind::Character,
+            "[{name}] is a person and must stay one, got {:?}",
+            segs[0]
+        );
+        assert_eq!(segs[0].speaker, name, "the name must survive verbatim");
+    }
+}
+
+#[test]
+fn a_typo_and_the_correct_spelling_merge_into_one_speaker() {
+    let segs = parse_tagged_prose("[narrator] One.\n[narraraor] Two.");
+    assert_eq!(
+        segs.len(),
+        1,
+        "a typo must not split the narrator in two: {segs:?}"
+    );
+    assert_eq!(segs[0].speaker, "narrator");
+}
+
 #[test]
 fn anything_else_is_a_character() {
     let segs = parse_tagged_prose("[Sera Vane] \"Hold the line.\"");

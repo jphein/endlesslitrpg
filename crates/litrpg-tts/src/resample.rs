@@ -98,7 +98,6 @@ impl PostProcess {
         }
         stages.join(",")
     }
-
 }
 
 /// EBU R128 target. `I=-20` sits inside the ACX audiobook window (−18 to −23 LUFS).
@@ -147,7 +146,11 @@ impl Default for FfmpegPostProcessor {
     fn default() -> Self {
         Self {
             ffmpeg: std::env::var("LITRPG_FFMPEG").unwrap_or_else(|_| "ffmpeg".to_string()),
-            loudnorm_two_pass: true,
+            // Overridable so the two options can be measured against each other on
+            // real audio, and so an operator can trade accuracy for wall clock.
+            loudnorm_two_pass: std::env::var("LITRPG_LOUDNORM_TWO_PASS")
+                .map(|v| v != "0")
+                .unwrap_or(true),
         }
     }
 }
@@ -172,7 +175,11 @@ impl FfmpegPostProcessor {
             "-nostdin".into(),
             "-nostats".into(),
             "-v".into(),
-            if verbose { "info".into() } else { "error".into() },
+            if verbose {
+                "info".into()
+            } else {
+                "error".into()
+            },
             "-f".into(),
             "s16le".into(),
             "-ar".into(),
@@ -218,8 +225,11 @@ impl FfmpegPostProcessor {
                      :measured_thresh={:.2}:offset={:.2}:linear=true",
                     s.input_i, s.input_tp, s.input_lra, s.input_thresh, s.target_offset
                 );
-                let (out, _) =
-                    self.run_pass(pcm16k, self.args_loudnorm(&chain, false, false), "loudnorm apply")?;
+                let (out, _) = self.run_pass(
+                    pcm16k,
+                    self.args_loudnorm(&chain, false, false),
+                    "loudnorm apply",
+                )?;
                 return Ok(out);
             }
         }
@@ -331,8 +341,14 @@ impl FfmpegPostProcessor {
             return Err(TtsError::Ffmpeg {
                 stage: stage.to_string(),
                 status: out.status.to_string(),
-                stderr: stderr_text.chars().rev().take(600).collect::<String>()
-                    .chars().rev().collect(),
+                stderr: stderr_text
+                    .chars()
+                    .rev()
+                    .take(600)
+                    .collect::<String>()
+                    .chars()
+                    .rev()
+                    .collect(),
             });
         }
         if write_failed && out.stdout.is_empty() && !stage.contains("measure") {

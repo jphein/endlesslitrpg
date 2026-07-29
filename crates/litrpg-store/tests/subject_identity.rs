@@ -15,10 +15,20 @@ fn cast_store() -> Store {
     let s = Store::open_in_memory().unwrap();
     s.upsert_cast("narrator", "sherpa:piper-en_GB-cori-high:0", "narrator", 1)
         .unwrap();
-    s.upsert_cast("SYSTEM", "azure:en-US-Steffan:DragonHDLatestNeural", "system", 1)
-        .unwrap();
-    s.upsert_cast("Kaelen", "azure:en-US-Andrew:DragonHDLatestNeural", "character", 1)
-        .unwrap();
+    s.upsert_cast(
+        "SYSTEM",
+        "azure:en-US-Steffan:DragonHDLatestNeural",
+        "system",
+        1,
+    )
+    .unwrap();
+    s.upsert_cast(
+        "Kaelen",
+        "azure:en-US-Andrew:DragonHDLatestNeural",
+        "character",
+        1,
+    )
+    .unwrap();
     s
 }
 
@@ -37,7 +47,10 @@ fn characters_are_known_but_narrator_and_system_are_not() {
     let known = cast_store().known_subjects().unwrap();
     assert!(known.contains("Kaelen"));
     assert!(!known.contains("SYSTEM"), "SYSTEM is a voice, not a person");
-    assert!(!known.contains("narrator"), "narrator is a voice, not a person");
+    assert!(
+        !known.contains("narrator"),
+        "narrator is a voice, not a person"
+    );
 }
 
 #[test]
@@ -68,8 +81,13 @@ fn a_database_already_polluted_with_system_rows_stops_accepting_more() {
     let s = Store::open_in_memory().unwrap();
     // Pollute first, while SYSTEM is still an unknown subject to nobody's benefit:
     // insert it as a *character* so the delta is accepted, then reclassify.
-    s.upsert_cast("SYSTEM", "azure:en-US-Steffan:DragonHDLatestNeural", "character", 1)
-        .unwrap();
+    s.upsert_cast(
+        "SYSTEM",
+        "azure:en-US-Steffan:DragonHDLatestNeural",
+        "character",
+        1,
+    )
+    .unwrap();
     s.append_delta(1, &delta("SYSTEM", "xp", 150))
         .unwrap()
         .unwrap();
@@ -91,7 +109,15 @@ fn a_database_already_polluted_with_system_rows_stops_accepting_more() {
 #[test]
 fn lore_characters_are_still_known() {
     let s = cast_store();
-    s.upsert_lore("Sera", "character", "sera", "Watches the exits.", 0, false, 1)
-        .unwrap();
+    s.upsert_lore(
+        "Sera",
+        "character",
+        "sera",
+        "Watches the exits.",
+        0,
+        false,
+        1,
+    )
+    .unwrap();
     assert!(s.known_subjects().unwrap().contains("Sera"));
 }

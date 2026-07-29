@@ -24,8 +24,10 @@
 //! 4. A **blank line ends the block** and resets the speaker to `narrator`. This is the
 //!    rule that stops the narration paragraph after a `[SYSTEM]` block being read aloud
 //!    in the robotic SYSTEM voice.
-//! 5. `SYSTEM` and `narrator` are recognised case-insensitively and canonicalised, so
-//!    `[system]` and `[SYSTEM]` do not mint two cast rows. Anything else is a character.
+//! 5. `SYSTEM` and `narrator` are recognised case-insensitively, canonicalised, and matched
+//!    **through a typo** — `[narration]` and `[narraraor]` are both the narrator, because the
+//!    live model emits both. Anything else is a character. Getting this wrong mints a
+//!    permanent `cast` row that narrates in a character's voice for the rest of the serial.
 //! 6. Consecutive same-speaker text merges into one segment; comparison is
 //!    case-insensitive and the first spelling wins.
 //! 7. A **malformed tag is prose** — `[unclosed`, `]backwards[`, `[]`, `[Kae[len]`.
@@ -70,16 +72,92 @@ pub const NARRATOR_ALIASES: &[&str] = &["narrator", "narration"];
 /// Spellings that mean the RPG readout voice.
 pub const SYSTEM_ALIASES: &[&str] = &["system"];
 
+/// Largest edit distance still treated as a misspelling of a role tag.
+const ROLE_TYPO_DISTANCE: usize = 2;
+
+/// A candidate must share this many leading characters with a role word before its edit
+/// distance is even considered. Without it, short names start colliding with role words.
+const ROLE_TYPO_PREFIX: usize = 2;
+
+/// Shortest candidate eligible for fuzzy matching. Below this, two edits is most of the word.
+const ROLE_TYPO_MIN_LEN: usize = 4;
+
 /// Which voice family a speaker name belongs to. Case-insensitive.
+///
+/// Exact alias matches first, then a **bounded fuzzy match** against the role words.
+///
+/// The fuzzy step exists because the live model mistypes them: a measured chapter contained
+/// `[narraraor]`, which was cast as a character, drew a character voice, and — `cast` being
+/// permanent — would have narrated the rest of the serial in it. An alias list cannot
+/// enumerate typos.
+///
+/// This is safe *because the tag namespace is structural*, not free text: the model is
+/// choosing between two role words and a character name, so a word two edits from `narrator`
+/// is overwhelmingly a broken `narrator` rather than a person. The guards keep it from
+/// eating real names — `Nara`, `Narran`, `Nadia`, `Syl` and `Nyx` all stay characters.
 pub fn classify_speaker(name: &str) -> SpeakerKind {
     let n = name.trim();
+
     if SYSTEM_ALIASES.iter().any(|a| n.eq_ignore_ascii_case(a)) {
-        SpeakerKind::System
-    } else if NARRATOR_ALIASES.iter().any(|a| n.eq_ignore_ascii_case(a)) {
-        SpeakerKind::Narrator
-    } else {
-        SpeakerKind::Character
+        return SpeakerKind::System;
     }
+    if NARRATOR_ALIASES.iter().any(|a| n.eq_ignore_ascii_case(a)) {
+        return SpeakerKind::Narrator;
+    }
+
+    // A multi-word tag is a name ("Sera Vane", "System Lord"), never a mistyped role word.
+    if n.chars().any(char::is_whitespace) {
+        return SpeakerKind::Character;
+    }
+
+    if SYSTEM_ALIASES.iter().any(|a| is_typo_of(n, a)) {
+        return SpeakerKind::System;
+    }
+    if NARRATOR_ALIASES.iter().any(|a| is_typo_of(n, a)) {
+        return SpeakerKind::Narrator;
+    }
+
+    SpeakerKind::Character
+}
+
+/// Whether `candidate` is a near-miss of `role`, under the guards above.
+fn is_typo_of(candidate: &str, role: &str) -> bool {
+    let c: Vec<char> = candidate.to_lowercase().chars().collect();
+    let r: Vec<char> = role.to_lowercase().chars().collect();
+
+    if c.len() < ROLE_TYPO_MIN_LEN {
+        return false;
+    }
+    // A length gap wider than the edit budget cannot be closed by it, and checking here
+    // stops a long name being compared against a short role word at all.
+    if c.len().abs_diff(r.len()) > ROLE_TYPO_DISTANCE {
+        return false;
+    }
+    if c.iter()
+        .take(ROLE_TYPO_PREFIX)
+        .ne(r.iter().take(ROLE_TYPO_PREFIX))
+    {
+        return false;
+    }
+
+    edit_distance(&c, &r) <= ROLE_TYPO_DISTANCE
+}
+
+/// Levenshtein distance, two rows rather than a full matrix.
+fn edit_distance(a: &[char], b: &[char]) -> usize {
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0usize; b.len() + 1];
+
+    for (i, ca) in a.iter().enumerate() {
+        cur[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            cur[j + 1] = (prev[j] + cost).min(prev[j + 1] + 1).min(cur[j] + 1);
+        }
+        core::mem::swap(&mut prev, &mut cur);
+    }
+
+    prev[b.len()]
 }
 
 /// Collapse a raw tag name to the form stored in `cast.speaker`.
@@ -202,6 +280,40 @@ mod tests {
         ] {
             assert_eq!(split_tag(line), None, "should be prose: {line:?}");
         }
+    }
+
+    #[test]
+    fn edit_distance_is_correct_on_the_cases_that_matter() {
+        let d = |a: &str, b: &str| {
+            edit_distance(
+                &a.chars().collect::<Vec<_>>(),
+                &b.chars().collect::<Vec<_>>(),
+            )
+        };
+        assert_eq!(d("narrator", "narrator"), 0);
+        assert_eq!(d("narrater", "narrator"), 1);
+        assert_eq!(d("narraraor", "narrator"), 2);
+        assert_eq!(d("", "abc"), 3);
+        assert_eq!(d("abc", ""), 3);
+        assert_eq!(d("kaelen", "narrator"), 7);
+    }
+
+    #[test]
+    fn the_typo_guards_hold_in_both_directions() {
+        assert!(is_typo_of("narraraor", "narrator"));
+        assert!(is_typo_of("NARRATER", "narrator"));
+        assert!(is_typo_of("sytem", "system"));
+
+        // Too short to risk it.
+        assert!(!is_typo_of("nar", "narrator"));
+        // Prefix does not match.
+        assert!(!is_typo_of("marrator", "narrator"));
+        // Length gap wider than the edit budget.
+        assert!(!is_typo_of("narr", "narrator"));
+        // Real names.
+        assert!(!is_typo_of("nara", "narrator"));
+        assert!(!is_typo_of("narran", "narrator"));
+        assert!(!is_typo_of("syl", "system"));
     }
 
     #[test]

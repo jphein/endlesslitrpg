@@ -172,7 +172,14 @@ where
     }
 
     /// How many times chapter `number`'s render has failed since this process started.
-    /// Useful for `litrpg status`: a chapter stuck at [`MAX_RESUME_ATTEMPTS`] needs a look.
+    ///
+    /// **In-process only, so the CLI can never read this.** `litrpg status` runs as a
+    /// separate process against the same database and would always see zero. This belongs in
+    /// the daemon's `GET /api/state`, which owns the running engine. The operator-visible,
+    /// persisted half of the same question is `Store::chapters_missing_audio()` — *which*
+    /// chapters lack audio is in SQLite; *how many times we have tried* is not, deliberately,
+    /// because a restart should retry a chapter whose missing model or expired key was just
+    /// fixed.
     pub fn resume_attempts(&self, number: u32) -> u32 {
         self.resume_failures
             .lock()
@@ -182,7 +189,11 @@ where
             .unwrap_or(0)
     }
 
-    /// Chapters that have prose, no audio, and have not exhausted their retries.
+    /// Chapters with prose and no audio that this process has given up on.
+    ///
+    /// Same caveat as [`Engine::resume_attempts`]: the attempt counts are in memory, so this
+    /// is a **daemon** view (`GET /api/state`), not something `litrpg status` can compute.
+    /// A CLI wanting "what has no audio" should call `Store::chapters_missing_audio()`.
     pub fn stuck_chapters(&self) -> Result<Vec<u32>, EngineError> {
         let unrendered = self.with_store(unrendered_chapters)?;
         Ok(unrendered

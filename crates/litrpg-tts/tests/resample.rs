@@ -313,7 +313,15 @@ fn measure_lufs(pcm: &[u8]) -> Option<f64> {
     std::fs::write(&path, pcm).ok()?;
     let out = std::process::Command::new("ffmpeg")
         .args([
-            "-hide_banner", "-nostats", "-f", "s16le", "-ar", "16000", "-ac", "1", "-i",
+            "-hide_banner",
+            "-nostats",
+            "-f",
+            "s16le",
+            "-ar",
+            "16000",
+            "-ac",
+            "1",
+            "-i",
         ])
         .arg(&path)
         .args(["-af", "ebur128", "-f", "null", "-"])

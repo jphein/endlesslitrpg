@@ -56,12 +56,15 @@ const AZURE_CHARACTERS: &[&str] = &[
 /// `RUST_LOG` overrides the default.
 fn init_logging() {
     use tracing_subscriber::EnvFilter;
+    // Writes to stderr rather than through `with_test_writer()`: the point is that a live
+    // diagnostic is visible unconditionally, not only when libtest happens to be forwarding
+    // captured output.
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| EnvFilter::new("litrpg_engine=debug,litrpg_tts=debug")),
         )
-        .with_test_writer()
+        .with_writer(std::io::stderr)
         .try_init();
 }
 
@@ -485,7 +488,9 @@ async fn a_second_cycle_never_rewrites_published_prose() {
     eprintln!("second cycle: {second:?}");
 
     // The assertion that matters, and it holds regardless of the audio path.
-    let after_second = engine.with_store(|s| s.chapter(1)).expect("chapter 1 again");
+    let after_second = engine
+        .with_store(|s| s.chapter(1))
+        .expect("chapter 1 again");
     assert_eq!(
         after_second.text_md, after_first.text_md,
         "chapter 1's prose was rewritten -- published history must be immutable"

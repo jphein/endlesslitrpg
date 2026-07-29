@@ -333,6 +333,205 @@ async fn pass_2_is_not_offered_the_voices_as_known_subjects() {
 }
 
 // ---------------------------------------------------------------------------
+// Gender-matched casting. The hint arrives with `new_lore`, i.e. *after* step 4 has
+// already cast the chapter, so the correction has to land before the render.
+// ---------------------------------------------------------------------------
+
+/// Four voices, two of each gender, so a mismatch is unambiguous.
+fn gendered_config() -> EngineConfig {
+    use litrpg_tts::Gender;
+    EngineConfig {
+        buffer_target: 3,
+        narrator_voice: "azure:narr".to_string(),
+        system_voice: "azure:sys".to_string(),
+        character_voices: vec![
+            "azure:f1".to_string(),
+            "azure:f2".to_string(),
+            "azure:m1".to_string(),
+            "azure:m2".to_string(),
+        ],
+        voice_genders: [
+            ("azure:narr", Gender::Female),
+            ("azure:sys", Gender::Neutral),
+            ("azure:f1", Gender::Female),
+            ("azure:f2", Gender::Female),
+            ("azure:m1", Gender::Male),
+            ("azure:m2", Gender::Male),
+        ]
+        .into_iter()
+        .map(|(v, g)| (v.to_string(), g))
+        .collect(),
+        ..EngineConfig::default()
+    }
+}
+
+fn gendered_engine(generator: FakeGenerator) -> FakeEngine {
+    Engine::new(
+        store(),
+        generator,
+        FakeRenderer::new(),
+        FakeLibrary::new(),
+        FakeArtifacts::new(),
+        gendered_config(),
+    )
+}
+
+#[tokio::test]
+async fn a_male_character_is_re_cast_to_a_male_voice_before_the_render() {
+    // Kaelen speaks first, so the round-robin hands him `azure:f1`. The hint corrects it.
+    let extraction = extraction_with(vec![], vec![gendered_lore("Kaelen", "male")]);
+    let e = gendered_engine(FakeGenerator::new().with_extraction(extraction));
+    e.run_cycle(0).await.unwrap();
+
+    let cast = e.cast_pairs();
+    let kaelen = cast
+        .iter()
+        .find(|(s, _)| s == "Kaelen")
+        .expect("Kaelen must be cast");
+    assert!(
+        kaelen.1.starts_with("azure:m"),
+        "Kaelen is male and drew {}",
+        kaelen.1
+    );
+
+    // And the correction reached the audio, not just the cast table.
+    for seg in e.segments(1).iter().filter(|s| s.speaker == "Kaelen") {
+        assert_eq!(
+            seg.voice_ref, kaelen.1,
+            "the manifest must agree with the cast"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_correct_guess_is_left_alone() {
+    // The round-robin already gives the first speaker a female voice, so a female hint must
+    // be a no-op rather than a needless re-draw.
+    let extraction = extraction_with(vec![], vec![gendered_lore("Kaelen", "female")]);
+    let e = gendered_engine(FakeGenerator::new().with_extraction(extraction));
+    e.run_cycle(0).await.unwrap();
+
+    let cast = e.cast_pairs();
+    let kaelen = cast.iter().find(|(s, _)| s == "Kaelen").unwrap();
+    assert_eq!(kaelen.1, "azure:f1");
+}
+
+#[tokio::test]
+async fn no_hint_leaves_casting_exactly_as_it_was() {
+    // The field is optional and a model that omits it must change nothing.
+    let with_hint = gendered_engine(FakeGenerator::new());
+    with_hint.run_cycle(0).await.unwrap();
+    let baseline = with_hint.cast_pairs();
+
+    let none = gendered_engine(FakeGenerator::new().with_extraction(extraction_with(
+        vec![],
+        vec![lore_row("Kaelen", "character", "kaelen")],
+    )));
+    none.run_cycle(0).await.unwrap();
+    assert_eq!(none.cast_pairs(), baseline, "an absent hint must be inert");
+}
+
+#[tokio::test]
+async fn a_nonsense_gender_value_is_ignored_rather_than_mis_casting() {
+    let extraction = extraction_with(vec![], vec![gendered_lore("Kaelen", "wizard")]);
+    let e = gendered_engine(FakeGenerator::new().with_extraction(extraction));
+    e.run_cycle(0).await.unwrap();
+    let cast = e.cast_pairs();
+    assert_eq!(
+        cast.iter().find(|(s, _)| s == "Kaelen").unwrap().1,
+        "azure:f1"
+    );
+}
+
+#[tokio::test]
+async fn a_gender_hint_on_a_place_is_ignored() {
+    let mut place = gendered_lore("The Ashen Vale", "male");
+    place.kind = "place".to_string();
+    let e =
+        gendered_engine(FakeGenerator::new().with_extraction(extraction_with(vec![], vec![place])));
+    e.run_cycle(0).await.unwrap();
+    // Nothing was re-cast, and the place did not become a cast member.
+    assert!(!e.cast_pairs().iter().any(|(s, _)| s == "The Ashen Vale"));
+}
+
+#[tokio::test]
+async fn an_exhausted_gender_group_degrades_instead_of_stealing_or_panicking() {
+    // Three male speakers but only two male voices. The third must keep its round-robin draw
+    // rather than panicking or taking a voice already assigned to someone else — the empty-pool
+    // fallback becomes load-bearing the moment gender filtering exists.
+    let prose = "\
+[Kaelen] \"One.\"
+
+[Joryn] \"Two.\"
+
+[Vance] \"Three.\"
+
+[narrator] They stood in the ash.";
+    let extraction = extraction_with(
+        vec![],
+        vec![
+            gendered_lore("Kaelen", "male"),
+            gendered_lore("Joryn", "male"),
+            gendered_lore("Vance", "male"),
+        ],
+    );
+    let e = gendered_engine(
+        FakeGenerator::new()
+            .with_prose(prose)
+            .with_extraction(extraction),
+    );
+    e.run_cycle(0).await.unwrap();
+
+    let cast = e.cast_pairs();
+    let voices: Vec<&String> = cast
+        .iter()
+        .filter(|(s, _)| s != "narrator")
+        .map(|(_, v)| v)
+        .collect();
+    let mut uniq = voices.clone();
+    uniq.sort();
+    uniq.dedup();
+    assert_eq!(
+        voices.len(),
+        uniq.len(),
+        "no two characters may share a voice even when a gender group runs dry: {cast:?}"
+    );
+    assert_eq!(
+        voices.iter().filter(|v| v.starts_with("azure:m")).count(),
+        2,
+        "both male voices should be used: {cast:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_established_character_is_never_re_voiced_by_a_late_hint() {
+    // Continuity: chapter 1 published Kaelen in a voice. A hint arriving in chapter 2 must not
+    // rewrite what chapter 1's audio already sounds like.
+    let e = gendered_engine(FakeGenerator::new());
+    e.run_cycle(u32::MAX).await.unwrap();
+    let before = e.cast_pairs();
+
+    let e2 = Engine::with_shared_store(
+        e.into_shared_store(),
+        FakeGenerator::new().with_extraction(extraction_with(
+            vec![],
+            vec![gendered_lore("Kaelen", "male")],
+        )),
+        FakeRenderer::new(),
+        FakeLibrary::new(),
+        FakeArtifacts::new(),
+        gendered_config(),
+    );
+    e2.run_cycle(u32::MAX).await.unwrap();
+
+    assert_eq!(
+        e2.cast_pairs(),
+        before,
+        "an established cast member must keep their voice"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Step 7 — a rejection is recorded, never fatal
 // ---------------------------------------------------------------------------
 
@@ -376,6 +575,57 @@ async fn a_rejected_delta_does_not_abort_the_chapter() {
         e.rejected_count(),
         1,
         "the rejection is stored for the §6.2 audit trail"
+    );
+}
+
+#[tokio::test]
+async fn placeholder_values_are_refused_rather_than_recorded_as_fact() {
+    // A real run produced 52 applied deltas, most of them `appear:* = "unknown"`, with
+    // `rejected: 0` — the gate accepts any string for a text field, correctly, since `""`
+    // means "slot is empty". So the guard has to be here.
+    let extraction = extraction_with(
+        vec![
+            delta_txt("Kaelen", "appear:eyes", "unknown"),
+            delta_txt("Kaelen", "appear:hair", "none"),
+            delta_txt("Kaelen", "location", "the Ashen Vale"),
+            delta_txt("Kaelen", "equip:head", ""),
+        ],
+        vec![],
+    );
+    let e = engine(
+        FakeGenerator::new().with_extraction(extraction),
+        FakeRenderer::new(),
+        FakeLibrary::new(),
+        FakeArtifacts::new(),
+    );
+
+    match e.run_cycle(0).await.unwrap() {
+        CycleOutcome::Produced {
+            applied, rejected, ..
+        } => {
+            assert_eq!(
+                applied, 2,
+                "the real location and the empty slot both apply"
+            );
+            assert_eq!(
+                rejected, 2,
+                "both placeholders must be counted, not silently dropped"
+            );
+        }
+        other => panic!("expected Produced, got {other:?}"),
+    }
+
+    let snap = e.with_store(|s| s.snapshot()).unwrap();
+    assert_eq!(snap.txt("Kaelen", "location"), Some("the Ashen Vale"));
+    assert_eq!(
+        snap.txt("Kaelen", "appear:eyes"),
+        None,
+        "a placeholder must leave no trace in the snapshot"
+    );
+    assert_eq!(
+        snap.txt("Kaelen", "equip:head"),
+        Some(""),
+        "an empty slot is a documented value (§6.0) and must survive"
     );
 }
 

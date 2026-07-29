@@ -65,8 +65,13 @@ fn the_schema_asks_for_a_story_facing_title() {
     // And the summary must be told to describe events, not the extraction.
     let sum = s["properties"]["summary"]["description"].as_str().unwrap();
     assert!(
-        sum.contains("IN THE STORY"),
+        sum.contains("in the story"),
         "the summary must be told to cover story events: {sum}"
+    );
+    // Measured live: adding `title` made the model start returning `"summary": ""`.
+    assert!(
+        sum.contains("Never empty"),
+        "the floor must be stated: {sum}"
     );
 }
 
@@ -223,6 +228,41 @@ fn valid_json_with_the_wrong_shape_is_malformed() {
     let err =
         parse_extraction(&json!({"deltas": []}).to_string()).expect_err("summary is required");
     assert!(err.is_malformed());
+}
+
+/// An empty summary is the story losing its memory: §6.3 forbids feeding previous chapters
+/// back verbatim, so summaries are the *only* long-range context there is. Measured live —
+/// adding `title` to the schema made the model start returning a good title and an empty
+/// summary, which every other layer would have reported as a success.
+#[test]
+fn an_empty_summary_is_malformed_so_the_retry_machinery_engages() {
+    for empty in ["", "   ", "\n\t "] {
+        let payload = json!({
+            "summary": empty, "title": "T",
+            "deltas": [], "new_lore": [], "quest_updates": []
+        })
+        .to_string();
+        let err =
+            parse_extraction(&payload).expect_err("an empty summary must not parse as success");
+        assert!(err.is_malformed(), "got {err:?}");
+        assert!(
+            format!("{err}").contains("long-range context"),
+            "the error should say why it matters: {err}"
+        );
+    }
+}
+
+#[test]
+fn a_present_summary_still_parses() {
+    let payload = json!({
+        "summary": "Kaelen broke the seal.", "title": "T",
+        "deltas": [], "new_lore": [], "quest_updates": []
+    })
+    .to_string();
+    assert_eq!(
+        parse_extraction(&payload).unwrap().summary,
+        "Kaelen broke the seal."
+    );
 }
 
 #[test]

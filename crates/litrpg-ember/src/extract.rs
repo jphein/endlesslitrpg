@@ -58,7 +58,7 @@ pub const EXTRACTION_SCHEMA: &str = r#"{
   "properties": {
     "summary": {
       "type": "string",
-      "description": "Two or three sentences of what happened IN THE STORY, for use as long-range context in later chapters. Facts about events, people and places -- not atmosphere, and never a remark about what data was or was not present."
+      "description": "Two or three sentences of what happened in the story, for use as long-range context in later chapters. Facts about events, people and places, not atmosphere. Never empty, and never a remark about the extraction itself."
     },
     "title": {
       "type": "string",
@@ -90,6 +90,7 @@ pub const EXTRACTION_SCHEMA: &str = r#"{
         "properties": {
           "name": {"type": "string"},
           "kind": {"type": "string", "enum": ["character", "place", "item", "faction", "rule"]},
+          "gender": {"type": ["string", "null"], "enum": ["male", "female", "neutral", null], "description": "For a character only, so the engine can cast a matching voice. Omit or null if the chapter does not make it clear; a guess is worse than nothing."},
           "keywords": {"type": "string", "description": "Comma-separated trigger words. Specific enough not to fire on unrelated chapters."},
           "body_md": {"type": "string"},
           "priority": {"type": "integer", "description": "Higher is injected first. 0 unless it is central."}
@@ -194,6 +195,32 @@ pub struct ProposedLore {
     pub body_md: String,
     #[serde(default)]
     pub priority: i32,
+    /// `male` | `female` | `neutral`, for a character.
+    ///
+    /// **A hint, never a contract.** Optional in the schema and `Option` here, so a model that
+    /// omits it degrades to un-gendered casting rather than failing an extraction — which
+    /// would cost the chapter's whole bookkeeping over a cosmetic detail.
+    ///
+    /// The engine consumes this to pick a voice and then discards it: the `cast` row's
+    /// `voice_ref` is the durable record, so there is nothing to persist and no schema change
+    /// in `lore`.
+    #[serde(default)]
+    pub gender: Option<String>,
+}
+
+impl ProposedLore {
+    /// The normalised gender hint, if this is a character and the model supplied one.
+    pub fn gender_hint(&self) -> Option<&str> {
+        if !self.kind.eq_ignore_ascii_case("character") {
+            return None;
+        }
+        match self.gender.as_deref()?.trim().to_ascii_lowercase().as_str() {
+            "male" => Some("male"),
+            "female" => Some("female"),
+            "neutral" => Some("neutral"),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -238,10 +265,25 @@ pub fn parse_extraction(content: &str) -> Result<Extraction, EmberError> {
         detail: "no complete JSON object found (truncated output?)".to_string(),
     })?;
 
-    serde_json::from_str(span).map_err(|e| EmberError::Malformed {
+    let parsed: Extraction = serde_json::from_str(span).map_err(|e| EmberError::Malformed {
         body: content.to_string(),
         detail: e.to_string(),
-    })
+    })?;
+
+    // Measured live: with `title` added to the schema, the model started returning a good title
+    // and `"summary": ""`. That is worse than it looks. Summaries are the *only* long-range
+    // context the story ever gets — §6.3 forbids feeding previous chapters back verbatim — so an
+    // empty one means the next chapter has no memory of this one, silently. Treating it as
+    // malformed routes it into the existing temperature-jitter retry instead.
+    if parsed.summary.trim().is_empty() {
+        return Err(EmberError::Malformed {
+            body: content.to_string(),
+            detail: "summary was empty; it is the only long-range context the story has"
+                .to_string(),
+        });
+    }
+
+    Ok(parsed)
 }
 
 /// The first complete, brace-balanced JSON object in `s`.

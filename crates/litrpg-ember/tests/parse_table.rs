@@ -518,6 +518,43 @@ Traffic was hell. I had to break their contract.";
     assert!(segs[2].text.starts_with("You're late, Kaelen."));
 }
 
+/// Measured live: the model satisfied "every chapter needs a `[SYSTEM]` block" with a bare
+/// `[SYSTEM]` and no content, immediately followed by the next speaker. The empty block must
+/// emit nothing and must not swallow whoever speaks next.
+#[test]
+fn an_empty_tag_block_followed_by_another_tag_loses_nothing() {
+    let raw = "\
+[Kaelen] \"No.\"
+[SYSTEM]
+[Sera] \"Well. That was artful.\"";
+
+    let segs = parse_tagged_prose(raw);
+    assert_eq!(
+        shape(&segs),
+        vec![
+            ("Kaelen", SpeakerKind::Character, "\"No.\""),
+            ("Sera", SpeakerKind::Character, "\"Well. That was artful.\""),
+        ],
+        "an empty SYSTEM block emits nothing and Sera still speaks"
+    );
+    assert_indices_dense(&segs);
+    assert!(
+        segs.iter().all(|s| !s.text.trim().is_empty()),
+        "no empty segment may reach the renderer"
+    );
+}
+
+#[test]
+fn a_trailing_bare_tag_emits_nothing() {
+    let segs = parse_tagged_prose("[narrator] The vale went quiet.\n[SYSTEM]");
+    assert_eq!(
+        segs.len(),
+        1,
+        "a dangling tag must not produce a silent segment"
+    );
+    assert_eq!(segs[0].speaker, "narrator");
+}
+
 #[test]
 fn a_multi_line_block_merges_without_losing_lines() {
     let raw = "[SYSTEM]\nLevel: 7\nHP: 41/60\nGold: 12";

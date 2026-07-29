@@ -144,6 +144,9 @@ async fn one_real_chapter_end_to_end() {
         narrator_voice: AZURE_NARRATOR.to_string(),
         system_voice: AZURE_SYSTEM.to_string(),
         character_voices: AZURE_CHARACTERS.iter().map(|s| s.to_string()).collect(),
+        // Gender metadata straight from the registry, so a pass-2 gender hint is matched
+        // against what Azure actually advertises.
+        voice_genders: registry_genders(&registry),
         summary_window: 5,
     };
 
@@ -269,7 +272,14 @@ async fn one_real_chapter_end_to_end() {
                 }
                 eprintln!("--- pass 2 proposed {} lore rows:", e.new_lore.len());
                 for l in &e.new_lore {
-                    eprintln!("      {} ({}) keywords={:?}", l.name, l.kind, l.keywords);
+                    eprintln!(
+                        "      {} ({}) gender={:?} hint={:?} keywords={:?}",
+                        l.name,
+                        l.kind,
+                        l.gender,
+                        l.gender_hint(),
+                        l.keywords
+                    );
                 }
             }
             Err(e) => eprintln!("--- diagnostic pass 2 failed: {e}"),
@@ -477,6 +487,7 @@ async fn a_second_cycle_never_rewrites_published_prose() {
             narrator_voice: AZURE_NARRATOR.to_string(),
             system_voice: AZURE_SYSTEM.to_string(),
             character_voices: AZURE_CHARACTERS.iter().map(|s| s.to_string()).collect(),
+            voice_genders: Default::default(),
             summary_window: 5,
         },
     );
@@ -540,6 +551,14 @@ fn planned_from(text_md: &str) -> Vec<litrpg_engine::PlannedSegment> {
             voice_ref: String::new(),
             text: s.text,
         })
+        .collect()
+}
+
+/// `voice_ref` → advertised gender, for gender-matched casting.
+fn registry_genders(r: &TtsRegistry) -> std::collections::BTreeMap<String, litrpg_tts::Gender> {
+    r.all_voices()
+        .into_iter()
+        .map(|v| (v.voice_ref, v.gender))
         .collect()
 }
 

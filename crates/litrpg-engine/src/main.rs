@@ -151,10 +151,12 @@ impl Args {
         Ok(a)
     }
 
-    fn poll_interval(&self) -> Duration {
+    /// `--poll-secs`, then `$LITRPG_POLL_SECS`, then the config file, then the built-in.
+    fn poll_interval(&self, from_config: Option<u64>) -> Duration {
         let secs = self
             .poll_secs
             .or_else(|| std::env::var("LITRPG_POLL_SECS").ok()?.parse().ok())
+            .or(from_config)
             .unwrap_or(DEFAULT_POLL_SECS);
         Duration::from_secs(secs.max(1))
     }
@@ -255,10 +257,19 @@ async fn run(args: Args) -> Result<ExitCode, Box<dyn std::error::Error>> {
         "voice plan"
     );
 
+    // Gender metadata comes from the registry's own catalogue, so a gender hint from pass 2
+    // is matched against what the plugins actually advertise rather than against a guess.
+    let voice_genders: std::collections::BTreeMap<String, litrpg_tts::Gender> = registry
+        .all_voices()
+        .into_iter()
+        .map(|v| (v.voice_ref, v.gender))
+        .collect();
+
     let engine_config = EngineConfig {
         narrator_voice: plan.narrator,
         system_voice: plan.system,
         character_voices: plan.characters,
+        voice_genders,
         ..base
     };
 
@@ -295,7 +306,7 @@ async fn run(args: Args) -> Result<ExitCode, Box<dyn std::error::Error>> {
         return Ok(ExitCode::SUCCESS);
     }
 
-    Ok(loop_until_signal(&engine, &args).await)
+    Ok(loop_until_signal(&engine, &args, config.poll_interval_secs).await)
 }
 
 /// Register sherpa when the feature is compiled in *and* its models pass preflight.
@@ -363,8 +374,8 @@ fn consumed_through(engine: &LiveEngine, args: &Args) -> Result<u32, Box<dyn std
     }
 }
 
-async fn loop_until_signal(engine: &LiveEngine, args: &Args) -> ExitCode {
-    let interval = args.poll_interval();
+async fn loop_until_signal(engine: &LiveEngine, args: &Args, config_poll_secs: u64) -> ExitCode {
+    let interval = args.poll_interval(Some(config_poll_secs));
     info!(
         poll_secs = interval.as_secs(),
         chapters = ?args.chapters,
@@ -526,16 +537,30 @@ mod tests {
             poll_secs: Some(0),
             ..Args::default()
         };
-        assert_eq!(a.poll_interval(), Duration::from_secs(1));
+        assert_eq!(a.poll_interval(None), Duration::from_secs(1));
+        assert_eq!(a.poll_interval(Some(0)), Duration::from_secs(1));
     }
 
     #[test]
     fn the_default_poll_interval_is_sane() {
         assert_eq!(
-            Args::default().poll_interval(),
+            Args::default().poll_interval(None),
             Duration::from_secs(DEFAULT_POLL_SECS)
         );
         assert!((30..=60).contains(&DEFAULT_POLL_SECS));
+        // The config file is consulted, but an explicit flag still wins.
+        assert_eq!(
+            Args::default().poll_interval(Some(90)),
+            Duration::from_secs(90)
+        );
+        assert_eq!(
+            Args {
+                poll_secs: Some(5),
+                ..Args::default()
+            }
+            .poll_interval(Some(90)),
+            Duration::from_secs(5)
+        );
     }
 
     #[test]

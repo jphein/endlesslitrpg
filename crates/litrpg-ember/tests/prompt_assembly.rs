@@ -498,6 +498,41 @@ fn pass2_lists_the_whitelists_straight_from_litrpg_core() {
     }
 }
 
+/// Measured live: pass 2 returned a good `title` and `"summary": ""`, twice, because the
+/// prompt asked for a title explicitly and never mentioned the summary at all — while the
+/// system prompt said "invent nothing; if the chapter does not state a change, do not report
+/// one", which reads as permission to leave it blank. The summary is the story's only memory
+/// of a chapter (§6.3), so it has to be asked for as plainly as the title.
+#[test]
+fn pass2_asks_for_the_summary_as_explicitly_as_the_title() {
+    let text = pass2_messages("body", &[])
+        .iter()
+        .map(|m| m.content.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        text.contains("`summary`"),
+        "the summary must be requested by name"
+    );
+    assert!(
+        text.contains("`title`"),
+        "the title must be requested by name"
+    );
+    assert!(
+        text.contains("only memory the story has"),
+        "say why an empty summary matters, not just that it is required"
+    );
+    assert!(
+        text.contains("always required and never empty"),
+        "the system prompt must separate describing from asserting"
+    );
+    assert!(
+        text.contains("an empty list is a correct answer"),
+        "invent-nothing must stay scoped to the deltas"
+    );
+}
+
 #[test]
 fn pass2_warns_against_inventing_subjects() {
     let text = pass2_messages("body", &["Kaelen".to_string()])

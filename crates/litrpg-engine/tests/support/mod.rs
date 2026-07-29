@@ -399,6 +399,17 @@ pub fn delta(subject: &str, field: &str, op: &str, num: Option<i64>) -> Proposed
     }
 }
 
+/// A text-valued delta.
+pub fn delta_txt(subject: &str, field: &str, txt: &str) -> ProposedDelta {
+    ProposedDelta {
+        subject: subject.to_string(),
+        field: field.to_string(),
+        op: "set".to_string(),
+        value_num: None,
+        value_txt: Some(txt.to_string()),
+    }
+}
+
 pub fn lore_row(name: &str, kind: &str, keywords: &str) -> ProposedLore {
     ProposedLore {
         name: name.to_string(),
@@ -406,6 +417,15 @@ pub fn lore_row(name: &str, kind: &str, keywords: &str) -> ProposedLore {
         keywords: keywords.to_string(),
         body_md: format!("About {name}."),
         priority: 0,
+        gender: None,
+    }
+}
+
+/// A lore row carrying a gender hint, for gender-matched casting.
+pub fn gendered_lore(name: &str, gender: &str) -> ProposedLore {
+    ProposedLore {
+        gender: Some(gender.to_string()),
+        ..lore_row(name, "character", &name.to_lowercase())
     }
 }
 

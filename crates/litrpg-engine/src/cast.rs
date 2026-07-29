@@ -19,7 +19,10 @@
 //! reserved voice; **both are excluded from the character pool** so a person can never
 //! draw the robot's voice or the narrator's.
 
+use std::collections::BTreeMap;
+
 use litrpg_core::SpeakerKind;
+use litrpg_tts::Gender;
 
 /// A distinct speaker seen in a chapter, in order of first appearance.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,6 +61,19 @@ const SID_GROUPS: [&[u32]; 4] = [
 
 /// Size of the character pool: all 28 English sids, minus the two reserved voices.
 pub const CHARACTER_POOL_LEN: usize = 26;
+
+/// Map a pass-2 gender hint onto the TTS layer's gender.
+///
+/// Returns `None` for anything unrecognised, so a stray value is ignored rather than
+/// mis-casting — the hint is advisory and a bad one must cost nothing.
+pub fn parse_gender(s: &str) -> Option<Gender> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "male" | "m" => Some(Gender::Male),
+        "female" | "f" => Some(Gender::Female),
+        "neutral" => Some(Gender::Neutral),
+        _ => None,
+    }
+}
 
 /// Build a `voice_ref` for a Kokoro speaker id.
 pub fn kokoro_voice_ref(sid: u32) -> String {
@@ -104,6 +120,9 @@ pub struct VoiceAssigner {
     narrator_voice: String,
     system_voice: String,
     pool: Vec<String>,
+    /// `voice_ref` → advertised gender, from the registry's own catalogue. Empty when the
+    /// caller has no metadata, in which case gendered casting simply does not happen.
+    voice_genders: BTreeMap<String, Gender>,
 }
 
 impl VoiceAssigner {
@@ -130,7 +149,16 @@ impl VoiceAssigner {
             narrator_voice,
             system_voice,
             pool,
+            voice_genders: BTreeMap::new(),
         }
+    }
+
+    /// Attach `voice_ref` → gender metadata, enabling [`VoiceAssigner::regender`].
+    ///
+    /// Additive: without it, casting behaves exactly as it did before gender hints existed.
+    pub fn with_genders(mut self, voice_genders: BTreeMap<String, Gender>) -> Self {
+        self.voice_genders = voice_genders;
+        self
     }
 
     pub fn narrator_voice(&self) -> &str {
@@ -194,6 +222,76 @@ impl VoiceAssigner {
         }
 
         out
+    }
+
+    /// Re-draw voices for characters cast **this cycle** whose gender is now known.
+    ///
+    /// Pass 2's `new_lore.gender` arrives after step 4 has already cast the chapter's speakers,
+    /// so this corrects those rows before the render in step 8. Within one cycle nothing has
+    /// been synthesised yet, so the first audio a character appears in is already in a matching
+    /// voice.
+    ///
+    /// **Only rows from this cycle are touched.** Re-voicing an established character would
+    /// rewrite continuity for every chapter they have already appeared in — the cast is
+    /// permanent by design, and a late-arriving hint is not a reason to break that.
+    ///
+    /// `wanted` maps speaker name to `"male" | "female" | "neutral"`. Returns only the rows
+    /// that changed.
+    pub fn regender(
+        &self,
+        newly_cast: &[CastAssignment],
+        wanted: &BTreeMap<String, String>,
+        all_cast_voices: &[String],
+    ) -> Vec<CastAssignment> {
+        let mut taken: Vec<String> = all_cast_voices.to_vec();
+        let mut changed = Vec::new();
+
+        for a in newly_cast {
+            if a.kind != SpeakerKind::Character {
+                continue;
+            }
+            let Some(want) = wanted
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(&a.speaker))
+                .map(|(_, g)| g.as_str())
+            else {
+                continue;
+            };
+            let Some(want) = parse_gender(want) else {
+                continue;
+            };
+
+            if self.gender_of(&a.voice_ref) == Some(want) {
+                continue; // already right
+            }
+
+            // Free means: in the pool, of the wanted gender, and not used by anyone else.
+            let replacement = self.pool.iter().find(|v| {
+                self.gender_of(v) == Some(want) && (**v == a.voice_ref || !taken.contains(v))
+            });
+
+            let Some(replacement) = replacement.cloned() else {
+                // Every voice of that gender is spoken for. Keeping the round-robin draw is
+                // the right degradation: a mismatched voice is cosmetic, and hunting for one
+                // that does not exist would either panic or steal another character's.
+                continue;
+            };
+
+            taken.retain(|v| *v != a.voice_ref);
+            taken.push(replacement.clone());
+            changed.push(CastAssignment {
+                speaker: a.speaker.clone(),
+                kind: a.kind,
+                voice_ref: replacement,
+            });
+        }
+
+        changed
+    }
+
+    /// The gender a voice was advertised with, if the registry told us.
+    fn gender_of(&self, voice_ref: &str) -> Option<Gender> {
+        self.voice_genders.get(voice_ref).copied()
     }
 
     /// First unused pool entry; if the pool is exhausted, wrap by the count of drawn

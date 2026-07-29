@@ -77,6 +77,10 @@ pub struct EngineConfig {
     /// backend: a `voice_ref` names its backend, so a sherpa pool on an Azure-only
     /// deployment fails at render time and the chapter ships silent.
     pub character_voices: Vec<String>,
+    /// `voice_ref` → advertised gender, from the TTS registry. Populated by the caller, since
+    /// the engine holds a [`Renderer`] rather than a registry. Empty disables gendered casting
+    /// entirely — the feature is additive.
+    pub voice_genders: BTreeMap<String, litrpg_tts::Gender>,
     pub summary_window: usize,
 }
 
@@ -88,6 +92,7 @@ impl Default for EngineConfig {
             narrator_voice: crate::cast::NARRATOR_FALLBACK_VOICE.to_string(),
             system_voice: crate::cast::SYSTEM_VOICE.to_string(),
             character_voices: crate::cast::character_pool(),
+            voice_genders: BTreeMap::new(),
             summary_window: SUMMARY_WINDOW,
         }
     }
@@ -99,8 +104,9 @@ impl EngineConfig {
             buffer_target: c.buffer_target,
             target_words: c.target_words,
             narrator_voice: c.narrator_voice.clone(),
-            system_voice: crate::cast::SYSTEM_VOICE.to_string(),
-            character_voices: crate::cast::character_pool(),
+            system_voice: c.system_voice.clone(),
+            character_voices: c.character_voices.clone(),
+            voice_genders: BTreeMap::new(),
             summary_window: SUMMARY_WINDOW,
         }
     }
@@ -381,7 +387,9 @@ where
             self.with_store(|s| s.upsert_cast(&a.speaker, &a.voice_ref, kind_str(a.kind), number))?;
         }
 
-        let planned = plan_segments(
+        // Mutable because a gender hint from pass 2 can re-voice a speaker cast this cycle,
+        // and that correction has to reach the render.
+        let mut planned = plan_segments(
             &parsed,
             &existing_cast,
             &new_cast,
@@ -444,6 +452,45 @@ where
                 })?;
             }
 
+            // Gender hints arrive with `new_lore`, i.e. after step 4 already cast this
+            // chapter's speakers. Correct those rows now: nothing has been synthesised yet, so
+            // the character's very first audio is already in a matching voice. Established
+            // cast members are never touched.
+            let wanted: BTreeMap<String, String> = e
+                .new_lore
+                .iter()
+                .filter_map(|l| l.gender_hint().map(|g| (l.name.clone(), g.to_string())))
+                .collect();
+            if !wanted.is_empty() && !new_cast.is_empty() {
+                let all_voices: Vec<String> = existing_cast
+                    .iter()
+                    .map(|(_, v)| v.clone())
+                    .chain(new_cast.iter().map(|a| a.voice_ref.clone()))
+                    .collect();
+
+                for fixed in assigner.regender(&new_cast, &wanted, &all_voices) {
+                    info!(
+                        speaker = %fixed.speaker,
+                        voice = %fixed.voice_ref,
+                        "re-cast to a gender-matched voice"
+                    );
+                    self.with_store(|s| {
+                        s.upsert_cast(
+                            &fixed.speaker,
+                            &fixed.voice_ref,
+                            kind_str(fixed.kind),
+                            number,
+                        )
+                    })?;
+                    for seg in planned
+                        .iter_mut()
+                        .filter(|p| p.speaker.eq_ignore_ascii_case(&fixed.speaker))
+                    {
+                        seg.voice_ref = fixed.voice_ref.clone();
+                    }
+                }
+            }
+
             for pd in &e.deltas {
                 let delta = match pd.to_delta() {
                     Ok(d) => d,
@@ -457,6 +504,17 @@ where
                 // The gate would *accept* these, because `narrator` and `SYSTEM` are cast
                 // rows and therefore known subjects. Stopping them here keeps a stat block's
                 // numbers from accruing to a voice instead of to the character it describes.
+                if is_placeholder_value(&delta) {
+                    warn!(
+                        subject = %delta.subject,
+                        field = %delta.field,
+                        value = ?delta.value_txt,
+                        "refusing a placeholder value; the gate would record it as fact"
+                    );
+                    rejected += 1;
+                    continue;
+                }
+
                 if is_voice_not_a_person(&delta.subject) {
                     warn!(
                         subject = %delta.subject,
@@ -597,6 +655,7 @@ where
             self.config.system_voice.clone(),
             self.config.character_voices.clone(),
         )
+        .with_genders(self.config.voice_genders.clone())
     }
 
     /// The lowest-numbered chapter that has prose, no audio, and retries left.
@@ -815,6 +874,44 @@ fn is_placeholder_title(t: &str) -> bool {
         || lower.contains("insert")
 }
 
+/// Text values that assert nothing and must never be recorded as state.
+///
+/// Measured live: a chapter whose `[SYSTEM]` block printed a full character sheet produced
+/// **52 applied deltas**, most of them `appear:eyes = "unknown"`, `appear:build = "unknown"`
+/// and so on. Nothing was rejected, because the gate accepts any string for a text field —
+/// correctly, since `""` legitimately means "slot is empty" (§6.0). So the character screen
+/// would have shown "eyes: unknown" as established fact, forever, from a placeholder.
+///
+/// `""` is deliberately **not** here: an empty string is a real, documented value.
+const PLACEHOLDER_VALUES: &[&str] = &[
+    "unknown",
+    "none",
+    "n/a",
+    "na",
+    "tbd",
+    "not specified",
+    "unspecified",
+    "not stated",
+    "not set",
+    "null",
+    "-",
+    "--",
+    "?",
+    "???",
+];
+
+/// Whether a delta's text value is a placeholder rather than a fact.
+fn is_placeholder_value(d: &litrpg_core::Delta) -> bool {
+    let Some(txt) = d.value_txt.as_deref() else {
+        return false;
+    };
+    let t = txt.trim().to_ascii_lowercase();
+    if t.is_empty() {
+        return false; // "" means "slot is empty", which is information.
+    }
+    PLACEHOLDER_VALUES.contains(&t.as_str())
+}
+
 /// Speaker names that are voices rather than people, and so can never be ledger subjects.
 ///
 /// `cast` holds a row for `narrator` and `SYSTEM` because they need voices, and the store's
@@ -926,6 +1023,52 @@ mod tests {
         ] {
             assert_eq!(derive_title(7, Some(good)), good);
         }
+    }
+
+    #[test]
+    fn placeholder_text_values_are_refused_but_an_empty_slot_is_not() {
+        let txt = |v: Option<&str>| litrpg_core::Delta {
+            subject: "Kaelen".into(),
+            field: "appear:eyes".into(),
+            op: litrpg_core::Op::Set,
+            value_num: None,
+            value_txt: v.map(str::to_string),
+        };
+
+        for junk in [
+            "unknown",
+            "Unknown",
+            "  UNKNOWN  ",
+            "none",
+            "N/A",
+            "tbd",
+            "not specified",
+            "-",
+            "???",
+            "null",
+        ] {
+            assert!(
+                is_placeholder_value(&txt(Some(junk))),
+                "{junk:?} asserts nothing and must not become state"
+            );
+        }
+
+        // Real values, including the documented empty slot.
+        for real in [
+            "",
+            "grey",
+            "a scar through the left brow",
+            "0",
+            "Blade of Unpaid Debts",
+        ] {
+            assert!(
+                !is_placeholder_value(&txt(Some(real))),
+                "{real:?} is a real value"
+            );
+        }
+
+        // A numeric delta has no text value and is unaffected.
+        assert!(!is_placeholder_value(&txt(None)));
     }
 
     #[test]

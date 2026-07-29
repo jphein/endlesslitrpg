@@ -262,6 +262,9 @@ advancing. This is a LitRPG: without it the chapter has no RPG layer and the sto
 recorded state can never advance.
 - Use only these stat names in a [SYSTEM] block: hp, max_hp, level, xp, gold, plus named \
 inventory items. Do not invent stats such as mana or stamina — they are discarded.
+- A [SYSTEM] block reports what *changed*. Never print a full character sheet, and never list \
+a field as unknown, none or not specified — a placeholder is recorded as if it were a fact, \
+and the character screen then shows \"eyes: unknown\" forever.
 - Numbers are the engine's job, not yours: state changes in prose or in a [SYSTEM] block, \
 but never contradict the state you were given.";
 
@@ -337,8 +340,14 @@ fn push_section(out: &mut String, heading: &str, body: &str) {
 
 const PASS2_SYSTEM: &str = "\
 You are a bookkeeping extractor for a LitRPG serial. You are given a finished chapter and \
-you report what changed, as JSON matching the supplied schema. You invent nothing. If the \
-chapter does not state a change, do not report one.";
+you report on it as JSON matching the supplied schema.
+
+Two different jobs, and the rules differ:
+
+- `deltas`, `new_lore` and `quest_updates` record what the chapter *states*. Invent nothing. \
+If the chapter does not state a change, do not report one — an empty list is a correct answer.
+- `summary` and `title` *describe* the chapter. They are always required and never empty. \
+Writing them is not inventing anything: the chapter is in front of you.";
 
 /// Assemble the extraction pass. Pair with [`crate::extract::response_format`] and
 /// temperature 0.
@@ -367,11 +376,18 @@ pub fn pass2_messages(chapter_text: &str, known_subjects: &[String]) -> Vec<Mess
          Report a delta only for a change the chapter actually states. A field outside \
          this list, or a subject that is not a real character, is rejected by the engine \
          and the change is lost — so do not invent either.\n\n\
+         Add a `new_lore` entry for every character who appears here for the first time, with \
+         `kind` = character and their `gender` — the engine casts a voice from it, and a voice \
+         once assigned is permanent. Omit `gender` rather than guessing.\n\n\
          `narrator` and `SYSTEM` are voices, not people. Never use either as a subject; \
          attribute a stat block's numbers to the character they describe.\n\n\
-         Also give the chapter a `title`: at most eight words naming the key event, in the \
-         story's own register. It is shown to readers as the chapter name, so do not write \
-         the word \"Chapter\", a number, a placeholder, or any square brackets.",
+         Always fill in these two, whatever else the chapter did or did not change:\n\
+         - `summary`: two or three sentences of what happened, in plain past tense. Later \
+         chapters are written from these and never from the prose itself, so this is the only \
+         memory the story has of this chapter. An empty summary erases it.\n\
+         - `title`: at most eight words naming the key event, in the story's own register. It \
+         is shown to readers as the chapter name, so do not write the word \"Chapter\", a \
+         number, a placeholder, or any square brackets.",
         chapter = chapter_text.trim(),
         subjects = subjects,
         numeric = NUMERIC_FIELDS.join(", "),

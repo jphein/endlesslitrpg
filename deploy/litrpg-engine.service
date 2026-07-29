@@ -1,0 +1,60 @@
+# The chapter loop. Generates until `buffer_target` chapters are rendered ahead of
+# the playback cursor, then idles cheaply.
+#
+#   sudo cp deploy/litrpg-engine.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now litrpg-engine
+#   journalctl -fu litrpg-engine
+#
+# Deliberately a separate unit from litrpg-daemon: generation is CPU- and
+# GPU-adjacent work that can be stopped for hours without affecting playback, and
+# serving chapters should not stop because generation is wedged.
+
+[Unit]
+Description=endless-litrpg — chapter generation loop
+Documentation=https://github.com/jphein/endlesslitrpg
+# Ember lives on familiar; without the network the first cycle fails fast and
+# systemd restarts it, which is noisy but correct.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jp
+Group=jp
+WorkingDirectory=/home/jp/Projects/endlesslitrpg
+
+Environment=LITRPG_CONFIG=/home/jp/Projects/endlesslitrpg/litrpg.toml
+Environment=RUST_LOG=info
+# sherpa-rs links libsherpa-onnx-c-api.so and libonnxruntime.so from the build
+# tree. Without this the binary exits 127 with "cannot open shared object file"
+# — the failure looks like a missing binary rather than a missing library.
+Environment=LD_LIBRARY_PATH=/home/jp/Projects/endlesslitrpg/target/release
+
+ExecStart=/home/jp/Projects/endlesslitrpg/target/release/litrpg-engine
+
+# Signals are checked *between* cycles. Every stage is idempotent by chapter
+# number, so stopping there is always safe; a longer timeout lets an in-flight
+# chapter finish publishing rather than being abandoned half-written.
+KillSignal=SIGTERM
+TimeoutStopSec=300
+
+Restart=on-failure
+RestartSec=30
+# Startup problems (no story row, unreachable Ember, no TTS backend) exit 2 and
+# are not fixed by restarting. Give up rather than loop.
+RestartPreventExitStatus=2
+
+# A generation loop must never take the machine down with it.
+Nice=10
+IOSchedulingClass=idle
+MemoryMax=4G
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+# The story is the one thing it must be able to write.
+ReadWritePaths=/home/jp/Projects/endlesslitrpg/data /home/jp/Projects/endlesslitrpg/media
+
+[Install]
+WantedBy=multi-user.target

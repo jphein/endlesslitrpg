@@ -1,0 +1,42 @@
+# The HTTP surface: chapter API, Range-capable PCM for the watch, RSS feed,
+# /api/version for status.realm.watch.
+#
+#   sudo cp deploy/litrpg-daemon.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now litrpg-daemon
+#   curl -s http://localhost:8093/api/version | jq
+#
+# Plain HTTP, no TLS, no DNS — the ESP32-C6 watch supports none of those, so it
+# reaches this at a literal 10.0.6.107:8093. That address needs a pinned DHCP
+# lease; the watch cannot resolve a name if it drifts.
+
+[Unit]
+Description=endless-litrpg — HTTP surface
+Documentation=https://github.com/jphein/endlesslitrpg
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jp
+Group=jp
+WorkingDirectory=/home/jp/Projects/endlesslitrpg
+
+Environment=LITRPG_CONFIG=/home/jp/Projects/endlesslitrpg/litrpg.toml
+Environment=RUST_LOG=info
+
+ExecStart=/home/jp/Projects/endlesslitrpg/target/release/litrpg-daemon
+
+Restart=always
+RestartSec=5
+
+# Reads chapters and writes only the playback cursor and director notes, so it
+# needs the database but not the media directory.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/home/jp/Projects/endlesslitrpg/data
+ReadOnlyPaths=/home/jp/Projects/endlesslitrpg/media
+
+[Install]
+WantedBy=multi-user.target

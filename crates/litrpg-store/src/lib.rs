@@ -1,12 +1,14 @@
 //! SQLite persistence. The only crate in the workspace that writes state.
 
 pub mod chapters;
+pub mod heartbeat;
 pub mod ledger;
 pub mod library;
 pub mod migrations;
 pub mod story;
 
 pub use chapters::{ChapterRow, NewChapter};
+pub use heartbeat::EngineHeartbeat;
 pub use ledger::{CastRow, NoteRow, REWOUND_REASON};
 pub use library::{LEVEL_CHAPTER, LoreRow, SummaryRow};
 pub use story::{NewStory, StoryRow};
@@ -45,6 +47,10 @@ pub enum StoreError {
     /// `known_subjects`, so every delta about the protagonist becomes an unknown subject).
     #[error("{field} cannot be empty")]
     EmptyField { field: &'static str },
+    /// The database was written by a newer build. Refused rather than opened, because the
+    /// alternative is an old binary quietly operating on a schema it does not know.
+    #[error("database schema is version {found}, but this binary supports {supported}; rebuild")]
+    SchemaTooNew { found: i64, supported: i64 },
     #[error("{0} is not in the cast")]
     UnknownSpeaker(String),
     #[error("chapter {chapter} segment {idx} has an unrecognised kind {value:?}")]
@@ -98,6 +104,19 @@ impl Store {
     /// Apply any migrations the database has not yet seen. Idempotent.
     pub fn migrate(&self) -> Result<()> {
         let current = self.schema_version()?;
+        // A database newer than this binary would otherwise open silently: every
+        // migration index is below `current`, so the loop applies nothing and the pragma
+        // update is skipped, and an old binary proceeds to operate on a schema it does
+        // not know. Additive migrations make that harmless right up until one drops a
+        // column, at which point the symptom is an obscure SQL error rather than "your
+        // binary is too old". Mixed binaries are the normal state here — the engine runs
+        // under systemd while the CLI is rebuilt against the same file.
+        if current > TARGET_VERSION {
+            return Err(StoreError::SchemaTooNew {
+                found: current,
+                supported: TARGET_VERSION,
+            });
+        }
         for (i, sql) in MIGRATIONS.iter().enumerate() {
             let version = i as i64;
             if version < current {

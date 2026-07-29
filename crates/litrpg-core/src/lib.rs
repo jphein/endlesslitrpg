@@ -8,8 +8,12 @@
 
 extern crate alloc;
 
+pub mod ledger;
 pub mod manifest;
+pub mod validate;
 pub mod voice;
 
+pub use ledger::{LedgerEntry, Op, StateSnapshot, Value, fold, rewind};
 pub use manifest::{BYTES_PER_MS, Manifest, SAMPLE_RATE_HZ, Segment, SpeakerKind};
+pub use validate::{Delta, Rejection, validate_delta};
 pub use voice::{VoiceRef, VoiceRefError};

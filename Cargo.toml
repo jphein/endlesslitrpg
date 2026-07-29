@@ -5,6 +5,8 @@ members = [
     "crates/litrpg-ember",
     "crates/litrpg-tts",
     "crates/litrpg-daemon",
+    "crates/litrpg-config",
+    "crates/litrpg-cli",
 ]
 resolver = "3"
 
@@ -44,3 +46,9 @@ litrpg-store = { path = "crates/litrpg-store" }
 litrpg-ember = { path = "crates/litrpg-ember" }
 litrpg-tts = { path = "crates/litrpg-tts" }
 litrpg-daemon = { path = "crates/litrpg-daemon" }
+litrpg-config = { path = "crates/litrpg-config" }
+
+clap = { version = "4.6.4", features = ["derive"] }
+toml = "1.1.4"
+anyhow = "1.0.104"
+dirs = "6.0.0"

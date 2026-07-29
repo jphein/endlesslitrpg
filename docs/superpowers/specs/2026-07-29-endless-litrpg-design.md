@@ -345,6 +345,29 @@ The mitigation that generalises is to assert the **shape** of the prose where it
 one line, no run of spaces, under a length bound. That is a property a tool can violate and a
 test can see, without pinning the wording.
 
+### A name that describes intent shields the implementation from review
+
+Three instances in one day, in three different modules, all of the same shape: an identifier or
+comment described what the code *should* do, the code did something else, and the description is
+what stopped anyone looking.
+
+- A retry comment describing a resume-from-position that the code did not perform.
+- `poll_volume`, whose own doc said "called at chunk boundaries" while its only call site sat
+  outside the streaming loop — so it fired once, after the chapter, reproducing the exact symptom
+  it had been added to fix.
+- A test named `counters_saturate_rather_than_wrapping` that looped 300 times and asserted
+  `u16::MAX.min(300)` — which is just `300`. It never approached saturation while its name
+  promised it did.
+
+The common thread is that **all three read correctly.** A wrong name invites suspicion; an
+accurate-sounding one buys the implementation a pass. This is §5.6's problem turned inward — a
+claim with no owner, except the claim is about the very function it sits on.
+
+The third case also shows where the leverage is: **clippy found it, a reviewer had not.** A name
+cannot be verified by reading, only by execution — so the check is to make the test fail on
+purpose, which is the same discipline as §5.5's "a test you have never seen fail is not yet
+evidence."
+
 One more, learned by writing the same sentence wrong twice in an afternoon: **assert the claim
 positively, not only negatively.** A negative assertion pins the mistake that has already been made
 and nothing else. `!out.contains("restoring the original")` was added the first time that phrase was

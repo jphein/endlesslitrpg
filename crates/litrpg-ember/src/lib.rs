@@ -46,7 +46,9 @@ pub use client::{
     EmberConfig, Message, Role,
 };
 pub use error::EmberError;
-pub use extract::{Extraction, ProposedDelta, ProposedLore, QuestUpdate, parse_extraction};
+pub use extract::{
+    Extraction, ProposedDelta, ProposedLore, ProposedSpeaker, QuestUpdate, parse_extraction,
+};
 pub use parse::{ParsedSegment, parse_tagged_prose};
 pub use prompt::{
     ChapterSummary, DEFAULT_TARGET_WORDS, LoreEntry, Pass1Input, match_lore, pass1_messages,

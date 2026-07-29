@@ -24,6 +24,15 @@ pub const NOTE_SOURCES: &[&str] = &["cli", "watch", "candela"];
 /// unauthenticated LAN endpoint is a needless liability.
 pub const MAX_NOTE_BYTES: usize = 4096;
 
+/// Transport bound for the whole request body, applied as a `DefaultBodyLimit` layer so
+/// an oversized payload is refused **before** being buffered.
+///
+/// Larger than [`MAX_NOTE_BYTES`] to leave room for JSON syntax, the `source` field and
+/// any escaping — the two limits answer different questions ("is this note too long"
+/// versus "how many bytes will we read from an unauthenticated caller"), so a single
+/// constant serving both would necessarily be wrong for one of them.
+pub const MAX_NOTE_BODY_BYTES: usize = MAX_NOTE_BYTES + 1024;
+
 #[derive(Debug, Deserialize)]
 pub struct NoteRequest {
     pub body: String,

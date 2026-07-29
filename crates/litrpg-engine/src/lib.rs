@@ -52,8 +52,9 @@ pub use cast::{
     character_pool, kokoro_voice_ref,
 };
 pub use cycle::{
-    Engine, EngineConfig, MAX_RESUME_ATTEMPTS, PASS1_TEMPERATURES, PASS2_TEMPERATURES,
-    SUMMARY_WINDOW, derive_title, distinct_speakers, plain_chapter_text, plan_segments,
+    BufferCursor, Engine, EngineConfig, MAX_RESUME_ATTEMPTS, PASS1_TEMPERATURES,
+    PASS2_TEMPERATURES, SUMMARY_WINDOW, derive_title, distinct_speakers, plain_chapter_text,
+    plan_segments,
 };
 pub use error::{CycleOutcome, EngineError};
 pub use library::StoreLibrary;

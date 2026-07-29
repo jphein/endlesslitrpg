@@ -65,6 +65,25 @@ const TITLE_MAX: usize = 60;
 /// expired key, and it is the natural moment to try again.
 pub const MAX_RESUME_ATTEMPTS: u32 = 3;
 
+/// Where the rendered-ahead buffer measures from (§5.1 step 1).
+///
+/// A type rather than a bare `u32` so that "read it fresh every cycle" is structural. The whole
+/// point of a settable cursor is that a long-running daemon notices when someone listens, and a
+/// value passed in at startup would make it inert in exactly the process that matters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BufferCursor {
+    /// Read `story.consumed_through` from the store, on every cycle. The normal mode.
+    #[default]
+    Stored,
+    /// An explicit override, for debugging.
+    At(u32),
+    /// Ignore the cursor: treat the buffer as always empty so generation never idles.
+    ///
+    /// Not a stand-in for anything now that a real cursor exists — it deliberately overrides
+    /// one, for backfilling a story or filling a buffer ahead of a listener.
+    Drain,
+}
+
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
     pub buffer_target: u32,
@@ -81,6 +100,12 @@ pub struct EngineConfig {
     /// the engine holds a [`Renderer`] rather than a registry. Empty disables gendered casting
     /// entirely — the feature is additive.
     pub voice_genders: BTreeMap<String, litrpg_tts::Gender>,
+    /// Backend ids the TTS registry actually has loaded, e.g. `["azure"]`. Populated by the
+    /// caller. Empty means "unknown", and then no substitution happens.
+    ///
+    /// Needed because the `cast` table can hold a `voice_ref` for a backend this process did not
+    /// load — a row written by a sherpa-enabled build, read by an Azure-only one.
+    pub renderable_backends: Vec<String>,
     pub summary_window: usize,
 }
 
@@ -93,6 +118,7 @@ impl Default for EngineConfig {
             system_voice: crate::cast::SYSTEM_VOICE.to_string(),
             character_voices: crate::cast::character_pool(),
             voice_genders: BTreeMap::new(),
+            renderable_backends: Vec::new(),
             summary_window: SUMMARY_WINDOW,
         }
     }
@@ -107,6 +133,7 @@ impl EngineConfig {
             system_voice: c.system_voice.clone(),
             character_voices: c.character_voices.clone(),
             voice_genders: BTreeMap::new(),
+            renderable_backends: Vec::new(),
             summary_window: SUMMARY_WINDOW,
         }
     }
@@ -250,12 +277,25 @@ where
         f(&guard).map_err(EngineError::Store)
     }
 
+    /// Resolve the buffer baseline for this cycle.
+    ///
+    /// `Stored` hits the database every time it is called, which is the behaviour that makes a
+    /// settable cursor mean anything.
+    fn resolve_cursor(&self, cursor: BufferCursor) -> Result<u32, EngineError> {
+        match cursor {
+            // `consumed_through()` answers 0 rather than erroring when there is no story row,
+            // so this needs no guard of its own.
+            BufferCursor::Stored => self.with_store(|s| s.consumed_through()),
+            BufferCursor::At(n) => Ok(n),
+            BufferCursor::Drain => self.with_store(|s| s.latest_number()),
+        }
+    }
+
     /// One turn of the loop.
     ///
-    /// `consumed_through` is the highest chapter the listener has finished, used for the
-    /// buffer depth in step 1. Pass `0` when nothing is known — the schema has no
-    /// playback cursor yet (see the notes in `morpheus-engine.md`).
-    pub async fn run_cycle(&self, consumed_through: u32) -> Result<CycleOutcome, EngineError> {
+    /// `cursor` fixes where the rendered-ahead buffer measures from; see [`BufferCursor`].
+    pub async fn run_cycle(&self, cursor: BufferCursor) -> Result<CycleOutcome, EngineError> {
+        let consumed_through = self.resolve_cursor(cursor)?;
         // ---- 0. Resume ------------------------------------------------------
         // A chapter with prose but no audio means either a crash between publish stages
         // or an earlier TTS failure. Re-render it; never regenerate prose that has
@@ -274,7 +314,21 @@ where
             );
 
             let resumed = match self.replan_from_store(number) {
-                Ok(planned) => self.render_and_publish(number, &planned).await,
+                Ok(mut planned) => {
+                    // Same hazard as a fresh chapter: the persisted segments carry whatever
+                    // `voice_ref` was written at the time, which may name a backend this
+                    // process did not load.
+                    for (speaker, voice) in crate::voices::substitute_unrenderable(
+                        &mut planned,
+                        &self.config.renderable_backends,
+                        &self.config.narrator_voice,
+                        &self.config.system_voice,
+                        &self.config.character_voices,
+                    ) {
+                        warn!(%speaker, %voice, "substituting an unrenderable voice to resume");
+                    }
+                    self.render_and_publish(number, &planned).await
+                }
                 Err(e) => {
                     warn!(chapter = number, error = %e, "could not rebuild segments to resume");
                     false
@@ -456,11 +510,23 @@ where
             // chapter's speakers. Correct those rows now: nothing has been synthesised yet, so
             // the character's very first audio is already in a matching voice. Established
             // cast members are never touched.
-            let wanted: BTreeMap<String, String> = e
-                .new_lore
-                .iter()
-                .filter_map(|l| l.gender_hint().map(|g| (l.name.clone(), g.to_string())))
-                .collect();
+            // `speakers` is the general source: it covers everyone who spoke, including the
+            // protagonist, so a hint arrives on every chapter rather than only on one that
+            // introduces someone. `new_lore` is the specific case and wins on a conflict,
+            // since a genuinely new character is described there in more detail.
+            //
+            // Keyed lowercase so two spellings of one name cannot both sit in the map.
+            let mut wanted: BTreeMap<String, String> = BTreeMap::new();
+            for sp in &e.speakers {
+                if let Some(g) = sp.gender_hint() {
+                    wanted.insert(sp.name.trim().to_lowercase(), g.to_string());
+                }
+            }
+            for l in &e.new_lore {
+                if let Some(g) = l.gender_hint() {
+                    wanted.insert(l.name.trim().to_lowercase(), g.to_string());
+                }
+            }
             if !wanted.is_empty() && !new_cast.is_empty() {
                 let all_voices: Vec<String> = existing_cast
                     .iter()
@@ -545,6 +611,23 @@ where
         }
 
         // ---- 8 + 9. Render and publish --------------------------------------
+        // A `cast` row can name a backend this process did not load. Substitute before
+        // rendering, or one such row costs the whole chapter's audio.
+        for (speaker, voice) in crate::voices::substitute_unrenderable(
+            &mut planned,
+            &self.config.renderable_backends,
+            &self.config.narrator_voice,
+            &self.config.system_voice,
+            &self.config.character_voices,
+        ) {
+            warn!(
+                %speaker,
+                %voice,
+                "cast voice is not renderable by the loaded backends; substituting for this \
+                 run only (the cast row is left alone, so a build with that backend restores it)"
+            );
+        }
+
         let has_audio = self.render_and_publish(number, &planned).await;
 
         // ---- 10. Notes are consumed once the chapter is durable --------------
@@ -638,13 +721,17 @@ where
         let parts = self.renderer.render_all(&requests).await?;
         let rendered = assemble(number, planned, parts)?;
 
+        // The files still get written; the store simply no longer records where they went.
+        // Chapter media lives at `media_dir/NNNN.{pcm,mp3}` by construction, so a stored path
+        // could only restate the layout — and a restatement can disagree with it, which is
+        // exactly how the old absolute paths came to point at a deleted directory.
         let pcm_path = self.artifacts.write_pcm(number, &rendered.pcm).await?;
-        let mp3_path = self.artifacts.encode_mp3(number, &pcm_path).await?;
+        self.artifacts.encode_mp3(number, &pcm_path).await?;
         self.artifacts
             .write_manifest(number, &rendered.manifest)
             .await?;
 
-        self.with_store(|s| s.attach_audio(number, &rendered.manifest, &pcm_path, &mp3_path))?;
+        self.with_store(|s| s.attach_audio(number, &rendered.manifest))?;
         Ok(())
     }
 

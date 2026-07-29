@@ -32,6 +32,157 @@ const DEFAULT_VOICE: &str = "en-US-Ava:DragonHDLatestNeural";
 /// 429s rather than more throughput.
 pub const BATCH_CONCURRENCY: usize = 4;
 
+/// **Measured** Azure DragonHD synthesis rate: ~34 ms of wall clock per character
+/// of input, i.e. ~30 chars/s, i.e. **2.27× realtime**.
+///
+/// Measured 2026-07-29 against real chapter prose in `eastus`, and the linearity is
+/// striking — 600 / 1600 / 3665-char requests came back at 30.8 / 29.7 / 30.0
+/// chars/s with no meaningful fixed overhead. Every size constant below is derived
+/// from this number rather than guessed.
+pub const MEASURED_MS_PER_CHAR: u64 = 34;
+
+/// Seconds of audio Azure produces per character of input (measured: 277.4 s of
+/// audio from 3 665 chars).
+pub const MEASURED_AUDIO_SECS_PER_CHAR: f64 = 0.0757;
+
+/// Largest text a single request may carry.
+///
+/// **This is the fix for the defect that killed the first full-length chapter.** A
+/// chapter's tagged prose puts a whole narrator block in one segment: chapter 1's
+/// segment 2 was **3 665 chars = 203 s of audio in one request**. Splitting *between*
+/// segments cannot help, because it is a single segment — so a long segment is split
+/// internally at sentence boundaries and the parts are concatenated.
+///
+/// 1 200 chars is ~41 s of wall clock and ~91 s of audio: comfortably inside Azure's
+/// 10-minute-per-request output cap, and small enough that four of them in flight
+/// still finish well inside [`timeout_for_chars`].
+pub const MAX_CHARS_PER_REQUEST: usize = 1_200;
+
+/// Floor for any request, covering DNS, TLS and Azure-side queueing.
+pub const TIMEOUT_FLOOR_SECS: u64 = 30;
+
+/// Timeout budget per character, ~4.4× the measured rate.
+///
+/// The generosity is deliberate and costs nothing when things work: a timeout is a
+/// **ceiling**, not a wait. Up to [`BATCH_CONCURRENCY`] requests are in flight at
+/// once and each one's clock runs while the others compete for the same throughput,
+/// so a request that takes 41 s solo can take far longer in a batch. The previous
+/// fixed 180 s ceiling is exactly what failed: segment 2 needed ~122 s alone, and
+/// four-way contention pushed it past three minutes.
+pub const TIMEOUT_MS_PER_CHAR: u64 = 150;
+
+/// Per-request timeout, scaled to the work.
+///
+/// A 200-word notification and a 2 000-word chapter must not share a budget — that
+/// was the shape of the original bug, and a larger fixed constant would simply move
+/// the cliff to a longer chapter.
+pub fn timeout_for_chars(chars: usize) -> Duration {
+    Duration::from_secs(TIMEOUT_FLOOR_SECS)
+        + Duration::from_millis(chars as u64 * TIMEOUT_MS_PER_CHAR)
+}
+
+/// Split text into request-sized parts, preferring **sentence** boundaries.
+///
+/// Sentence boundaries matter for more than tidiness: the parts are synthesized
+/// independently and concatenated, so each join is a prosody discontinuity. Landing
+/// it where a reader would already pause makes it inaudible; landing it mid-clause
+/// would not be.
+///
+/// Falls back to word boundaries for a sentence that is itself over budget (one long
+/// line of dialogue), and as a last resort emits an over-budget part rather than
+/// dropping text — a segment silently missing from a chapter is worse than a request
+/// Azure might reject.
+pub fn split_for_requests(text: &str, max_chars: usize) -> Vec<String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Vec::new();
+    }
+    let max = max_chars.max(1);
+    if text.chars().count() <= max {
+        return vec![text.to_string()];
+    }
+
+    // Sentence-ish units: keep the terminator and any closing quote with the
+    // sentence it ends.
+    let mut units: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        cur.push(c);
+        if matches!(c, '.' | '!' | '?') {
+            // Absorb trailing quotes/brackets that belong to this sentence.
+            while let Some(&n) = chars.peek() {
+                if matches!(n, '"' | '\'' | '”' | '’' | ')' | ']') {
+                    cur.push(n);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            // A terminator followed by whitespace ends the sentence. Without the
+            // whitespace check, "4,200 Gold" style decimals would split.
+            if chars.peek().is_none_or(|n| n.is_whitespace()) {
+                units.push(cur.trim().to_string());
+                cur.clear();
+            }
+        }
+    }
+    if !cur.trim().is_empty() {
+        units.push(cur.trim().to_string());
+    }
+
+    // Any unit still over budget is broken on words.
+    let mut pieces: Vec<String> = Vec::new();
+    for unit in units {
+        if unit.chars().count() <= max {
+            pieces.push(unit);
+            continue;
+        }
+        let mut buf = String::new();
+        for word in unit.split_whitespace() {
+            let need = if buf.is_empty() {
+                word.chars().count()
+            } else {
+                buf.chars().count() + 1 + word.chars().count()
+            };
+            if need > max && !buf.is_empty() {
+                pieces.push(std::mem::take(&mut buf));
+            }
+            if !buf.is_empty() {
+                buf.push(' ');
+            }
+            buf.push_str(word);
+        }
+        if !buf.is_empty() {
+            // A single token over budget goes out as-is; losing it is worse.
+            pieces.push(buf);
+        }
+    }
+
+    // Greedily repack whole sentences up to the budget, so we make as few requests
+    // as possible without ever crossing a sentence in the middle.
+    let mut out: Vec<String> = Vec::new();
+    let mut acc = String::new();
+    for piece in pieces {
+        let need = if acc.is_empty() {
+            piece.chars().count()
+        } else {
+            acc.chars().count() + 1 + piece.chars().count()
+        };
+        if need > max && !acc.is_empty() {
+            out.push(std::mem::take(&mut acc));
+        }
+        if !acc.is_empty() {
+            acc.push(' ');
+        }
+        acc.push_str(&piece);
+    }
+    if !acc.is_empty() {
+        out.push(acc);
+    }
+    out
+}
+
 /// Characters allowed in an SSML attribute value. Mirrors `speech-to-cli`'s
 /// `_SSML_SAFE_RE`, which is the same guard on the same voice strings.
 fn is_attr_safe(c: char) -> bool {
@@ -525,13 +676,19 @@ pub struct AzureBackend {
     /// matters more than keeping a character's voice stable; every substitution is
     /// logged to stderr.
     fallback_on_reject: bool,
+    /// Largest text one request may carry. Defaults to [`MAX_CHARS_PER_REQUEST`].
+    max_chars_per_request: usize,
 }
 
 impl AzureBackend {
     /// Build from an already-resolved config.
     pub fn new(config: AzureConfig) -> Self {
+        // No global timeout: it is set per request from the text length. A single
+        // fixed ceiling is what killed the first full-length chapter — see
+        // `timeout_for_chars`. The connect timeout stays bounded so a dead network
+        // still fails fast.
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(180))
+            .connect_timeout(Duration::from_secs(15))
             .build()
             .unwrap_or_default();
         let voices = Self::default_voices(&config);
@@ -540,7 +697,21 @@ impl AzureBackend {
             client,
             voices,
             fallback_on_reject: false,
+            max_chars_per_request: MAX_CHARS_PER_REQUEST,
         }
+    }
+
+    /// Override the per-request text budget. Lower it if Azure throughput degrades;
+    /// raising it past ~7 000 chars risks the 10-minute output cap.
+    #[must_use]
+    pub fn with_max_chars_per_request(mut self, max: usize) -> Self {
+        self.max_chars_per_request = max.max(1);
+        self
+    }
+
+    /// The per-request text budget in effect.
+    pub fn max_chars_per_request(&self) -> usize {
+        self.max_chars_per_request
     }
 
     /// Enable same-locale, same-gender voice substitution on an Azure 4xx.
@@ -712,6 +883,11 @@ impl AzureBackend {
         out
     }
 
+    /// One multi-voice request for a chunk of segments.
+    async fn post_chunk(&self, chunk: &[RenderRequest], chars: usize) -> Result<Pcm16k> {
+        self.post_ssml(build_multi_voice_ssml(chunk), chars).await
+    }
+
     /// Validate every voice name before spending anything.
     fn check(reqs: &[RenderRequest]) -> Result<()> {
         for r in reqs {
@@ -726,7 +902,29 @@ impl AzureBackend {
     /// on a 5xx or a network error, where the voice is fine and the right response is
     /// to retry the same voice later rather than silently recast a character.
     async fn render_one(&self, req: &RenderRequest) -> Result<Pcm16k> {
-        match self.post_ssml(build_ssml(req)).await {
+        // A single segment can be minutes of audio: chapter 1's segment 2 was 3665
+        // chars = 203 s. Split it at sentence boundaries and concatenate — safe
+        // because every part is the same voice at the same 16 kHz contract, so a join
+        // is `Vec::extend`.
+        let parts = split_for_requests(&req.text, self.max_chars_per_request);
+        let mut out = Pcm16k::empty();
+        for part in &parts {
+            let mut sub = req.clone();
+            sub.text = part.clone();
+            out.extend(&self.render_attempt(&sub).await?);
+        }
+        Ok(out.padded_to_whole_ms())
+    }
+
+    /// One request for one already-budgeted piece of text, with the voice-rejection
+    /// retry.
+    ///
+    /// The retry fires only on HTTP 4xx — Azure saying "that voice is wrong" — never
+    /// on a 5xx or a network error, where the voice is fine and the right response is
+    /// to retry the same voice later rather than silently recast a character.
+    async fn render_attempt(&self, req: &RenderRequest) -> Result<Pcm16k> {
+        let chars = req.text.chars().count();
+        match self.post_ssml(build_ssml(req), chars).await {
             Err(TtsError::HttpStatus { status, body }) if (400..500).contains(&status) => {
                 let Some(sub) = self
                     .fallback_on_reject
@@ -741,20 +939,23 @@ impl AzureBackend {
                     remainder: sub.clone(),
                 };
                 // Loud on purpose: a voice substitution is a story-continuity event,
-                // not a transparent recovery. See `AzureConfig::fallback_on_reject`.
+                // not a transparent recovery. See `AzureBackend::fallback_on_reject`.
                 eprintln!(
                     "litrpg-tts: azure rejected voice '{}' ({status}) for segment {}; \
                      falling back to '{sub}'. The cast table should be fixed.",
                     req.voice.remainder, req.idx
                 );
-                self.post_ssml(build_ssml(&retry)).await
+                self.post_ssml(build_ssml(&retry), chars).await
             }
             other => other,
         }
     }
 
     /// POST one SSML document and return the raw PCM body.
-    async fn post_ssml(&self, ssml: String) -> Result<Pcm16k> {
+    ///
+    /// `text_chars` is the number of characters of *spoken text* in the document (not
+    /// the markup), which is what the timeout scales from.
+    async fn post_ssml(&self, ssml: String, text_chars: usize) -> Result<Pcm16k> {
         let resp = self
             .client
             .post(self.config.endpoint())
@@ -762,6 +963,7 @@ impl AzureBackend {
             .header("Content-Type", "application/ssml+xml")
             .header("X-Microsoft-OutputFormat", OUTPUT_FORMAT)
             .header("User-Agent", "litrpg-tts")
+            .timeout(timeout_for_chars(text_chars))
             .body(ssml.into_bytes())
             .send()
             .await?;
@@ -878,7 +1080,44 @@ impl TtsBackend for AzureBackend {
         if reqs.iter().all(RenderRequest::is_blank) {
             return Ok(Pcm16k::empty());
         }
-        self.post_ssml(build_multi_voice_ssml(reqs)).await
+
+        // Chunked along **segment** boundaries, so a voice change always coincides
+        // with a request boundary and no request carries more than
+        // `max_chars_per_request`. Whole scenes stay together where they fit, so the
+        // one-request advantage is reduced rather than thrown away.
+        //
+        // A single document for a whole chapter does not survive a real chapter: 8 185
+        // chars is ~274 s of synthesis and ~620 s of audio, over Azure's
+        // 10-minute-per-request output cap even with an unlimited timeout.
+        let mut out = Pcm16k::empty();
+        let mut chunk: Vec<RenderRequest> = Vec::new();
+        let mut chunk_chars = 0usize;
+
+        for r in reqs.iter().filter(|r| !r.is_blank()) {
+            let n = r.text.chars().count();
+            // A segment bigger than a whole chunk is rendered on its own, where
+            // `render_one` splits it internally.
+            if n > self.max_chars_per_request {
+                if !chunk.is_empty() {
+                    out.extend(&self.post_chunk(&chunk, chunk_chars).await?);
+                    chunk.clear();
+                    chunk_chars = 0;
+                }
+                out.extend(&self.render_one(r).await?);
+                continue;
+            }
+            if chunk_chars + n > self.max_chars_per_request && !chunk.is_empty() {
+                out.extend(&self.post_chunk(&chunk, chunk_chars).await?);
+                chunk.clear();
+                chunk_chars = 0;
+            }
+            chunk_chars += n;
+            chunk.push(r.clone());
+        }
+        if !chunk.is_empty() {
+            out.extend(&self.post_chunk(&chunk, chunk_chars).await?);
+        }
+        Ok(out.padded_to_whole_ms())
     }
 }
 
@@ -891,6 +1130,7 @@ impl AzureBackend {
             client: self.client.clone(),
             voices: Vec::new(),
             fallback_on_reject: self.fallback_on_reject,
+            max_chars_per_request: self.max_chars_per_request,
         }
     }
 }

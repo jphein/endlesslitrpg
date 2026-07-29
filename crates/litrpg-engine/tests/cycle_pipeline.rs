@@ -8,7 +8,7 @@
 mod support;
 
 use litrpg_ember::EmberError;
-use litrpg_engine::{CycleOutcome, Engine, EngineConfig, SYSTEM_VOICE};
+use litrpg_engine::{BufferCursor, CycleOutcome, Engine, EngineConfig, SYSTEM_VOICE};
 use support::*;
 
 fn config() -> EngineConfig {
@@ -42,7 +42,7 @@ async fn a_first_cycle_produces_chapter_one_with_audio() {
         FakeArtifacts::new(),
     );
 
-    match e.run_cycle(0).await.unwrap() {
+    match e.run_cycle(BufferCursor::At(0)).await.unwrap() {
         CycleOutcome::Produced {
             chapter,
             has_audio,
@@ -67,7 +67,10 @@ async fn chapter_numbers_advance_one_at_a_time() {
     );
     for expected in 1..=3u32 {
         assert_eq!(
-            e.run_cycle(u32::MAX).await.unwrap().produced_chapter(),
+            e.run_cycle(BufferCursor::Drain)
+                .await
+                .unwrap()
+                .produced_chapter(),
             Some(expected)
         );
     }
@@ -82,7 +85,7 @@ async fn all_four_artifacts_are_written() {
         FakeLibrary::new(),
         artifacts,
     );
-    e.run_cycle(0).await.unwrap();
+    e.run_cycle(BufferCursor::At(0)).await.unwrap();
 
     let kinds = e.artifacts_kinds();
     // Four, including the markdown. A real run had `.pcm`, `.mp3` and `.json` on disk and no
@@ -106,7 +109,7 @@ async fn the_chapter_markdown_is_written_even_when_the_render_fails() {
         FakeLibrary::new(),
         FakeArtifacts::new(),
     );
-    e.run_cycle(0).await.unwrap();
+    e.run_cycle(BufferCursor::At(0)).await.unwrap();
 
     assert!(!e.has_audio(1));
     assert!(
@@ -125,7 +128,7 @@ async fn a_failure_to_write_the_markdown_does_not_cost_the_chapter() {
         FakeLibrary::new(),
         FakeArtifacts::failing_on("text"),
     );
-    match e.run_cycle(0).await.unwrap() {
+    match e.run_cycle(BufferCursor::At(0)).await.unwrap() {
         CycleOutcome::Produced {
             chapter, has_audio, ..
         } => {
@@ -151,10 +154,16 @@ async fn the_cycle_idles_once_the_buffer_is_full() {
     );
 
     for _ in 0..3 {
-        assert!(e.run_cycle(0).await.unwrap().produced_chapter().is_some());
+        assert!(
+            e.run_cycle(BufferCursor::At(0))
+                .await
+                .unwrap()
+                .produced_chapter()
+                .is_some()
+        );
     }
 
-    match e.run_cycle(0).await.unwrap() {
+    match e.run_cycle(BufferCursor::At(0)).await.unwrap() {
         CycleOutcome::Idle { buffer_depth } => assert_eq!(buffer_depth, 3),
         other => panic!("expected Idle at buffer_target 3, got {other:?}"),
     }
@@ -174,18 +183,161 @@ async fn a_consumed_chapter_frees_buffer_space() {
         FakeArtifacts::new(),
     );
     for _ in 0..3 {
-        e.run_cycle(0).await.unwrap();
+        e.run_cycle(BufferCursor::At(0)).await.unwrap();
     }
     assert!(matches!(
-        e.run_cycle(0).await.unwrap(),
+        e.run_cycle(BufferCursor::At(0)).await.unwrap(),
         CycleOutcome::Idle { .. }
     ));
 
     // The listener finished chapter 1, so only 2 remain ahead of them.
     assert!(
-        e.run_cycle(1).await.unwrap().produced_chapter().is_some(),
+        e.run_cycle(BufferCursor::At(1))
+            .await
+            .unwrap()
+            .produced_chapter()
+            .is_some(),
         "consuming a chapter should let production resume"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The playback cursor. `Stored` must be re-read every cycle, or a long-running
+// daemon never notices that anyone listened — which is the entire point of it
+// being settable.
+// ---------------------------------------------------------------------------
+
+/// A story row has to exist before the cursor can be set.
+fn seed_story(e: &FakeEngine) {
+    e.with_store(|s| {
+        s.insert_story_if_absent(&litrpg_store::NewStory {
+            title: "The Ashen Ledger".into(),
+            protagonist: "Kaelen".into(),
+            prompt_path: "/dev/null".into(),
+            prompt_hash: litrpg_core::content_hash("x"),
+            target_words: 600,
+        })
+    })
+    .unwrap();
+}
+
+#[tokio::test]
+async fn the_stored_cursor_is_re_read_on_every_cycle() {
+    let e = engine(
+        FakeGenerator::new(),
+        FakeRenderer::new(),
+        FakeLibrary::new(),
+        FakeArtifacts::new(),
+    );
+    seed_story(&e);
+
+    // buffer_target is 3, cursor is 0, so three chapters then idle.
+    for _ in 0..3 {
+        assert!(
+            e.run_cycle(BufferCursor::Stored)
+                .await
+                .unwrap()
+                .produced_chapter()
+                .is_some()
+        );
+    }
+    assert!(matches!(
+        e.run_cycle(BufferCursor::Stored).await.unwrap(),
+        CycleOutcome::Idle { .. }
+    ));
+
+    // Someone listens to chapter 1 *while the engine is running*. Caching the cursor at
+    // startup would leave this process idling forever.
+    e.with_store(|s| s.set_consumed_through(1)).unwrap();
+
+    assert_eq!(
+        e.run_cycle(BufferCursor::Stored)
+            .await
+            .unwrap()
+            .produced_chapter(),
+        Some(4),
+        "the cursor moved, so the buffer has room again"
+    );
+}
+
+#[tokio::test]
+async fn a_missing_story_row_reads_as_a_zero_cursor_rather_than_erroring() {
+    // `consumed_through()` answers 0 with no story row, and it is read every cycle, so the
+    // cycle must not need a story row of its own to check the buffer.
+    let e = engine(
+        FakeGenerator::new(),
+        FakeRenderer::new(),
+        FakeLibrary::new(),
+        FakeArtifacts::new(),
+    );
+    assert_eq!(
+        e.run_cycle(BufferCursor::Stored)
+            .await
+            .unwrap()
+            .produced_chapter(),
+        Some(1)
+    );
+}
+
+#[tokio::test]
+async fn an_explicit_cursor_overrides_the_stored_one() {
+    let e = engine(
+        FakeGenerator::new(),
+        FakeRenderer::new(),
+        FakeLibrary::new(),
+        FakeArtifacts::new(),
+    );
+    seed_story(&e);
+    for _ in 0..3 {
+        e.run_cycle(BufferCursor::Stored).await.unwrap();
+    }
+    assert!(matches!(
+        e.run_cycle(BufferCursor::Stored).await.unwrap(),
+        CycleOutcome::Idle { .. }
+    ));
+
+    // The stored cursor still says 0, but the override says two chapters are done.
+    assert_eq!(
+        e.run_cycle(BufferCursor::At(2))
+            .await
+            .unwrap()
+            .produced_chapter(),
+        Some(4)
+    );
+    assert_eq!(
+        e.with_store(|s| s.consumed_through()).unwrap(),
+        0,
+        "an override must not write back to the database"
+    );
+}
+
+#[tokio::test]
+async fn drain_ignores_a_stored_cursor_entirely() {
+    let e = engine(
+        FakeGenerator::new(),
+        FakeRenderer::new(),
+        FakeLibrary::new(),
+        FakeArtifacts::new(),
+    );
+    seed_story(&e);
+
+    // Well past buffer_target, and never idle.
+    for expected in 1..=5u32 {
+        assert_eq!(
+            e.run_cycle(BufferCursor::Drain)
+                .await
+                .unwrap()
+                .produced_chapter(),
+            Some(expected)
+        );
+    }
+    assert_eq!(e.with_store(|s| s.consumed_through()).unwrap(), 0);
+}
+
+#[tokio::test]
+async fn the_default_cursor_is_the_stored_one() {
+    // So a caller that forgets to choose gets the behaviour that respects the listener.
+    assert_eq!(BufferCursor::default(), BufferCursor::Stored);
 }
 
 // ---------------------------------------------------------------------------
@@ -209,7 +361,7 @@ async fn new_lore_is_applied_before_the_deltas_so_a_new_character_is_a_known_sub
         FakeArtifacts::new(),
     );
 
-    match e.run_cycle(0).await.unwrap() {
+    match e.run_cycle(BufferCursor::At(0)).await.unwrap() {
         CycleOutcome::Produced {
             applied, rejected, ..
         } => {
@@ -237,7 +389,7 @@ async fn a_subject_that_was_never_introduced_is_still_rejected() {
         FakeArtifacts::new(),
     );
 
-    match e.run_cycle(0).await.unwrap() {
+    match e.run_cycle(BufferCursor::At(0)).await.unwrap() {
         CycleOutcome::Produced {
             applied, rejected, ..
         } => {
@@ -261,7 +413,7 @@ async fn a_speaking_character_becomes_a_known_subject_via_the_cast() {
         FakeArtifacts::new(),
     );
 
-    match e.run_cycle(0).await.unwrap() {
+    match e.run_cycle(BufferCursor::At(0)).await.unwrap() {
         CycleOutcome::Produced { applied, .. } => assert_eq!(applied, 1),
         other => panic!("expected Produced, got {other:?}"),
     }
@@ -289,7 +441,7 @@ async fn a_delta_addressed_to_a_voice_is_refused_not_applied() {
         FakeArtifacts::new(),
     );
 
-    match e.run_cycle(0).await.unwrap() {
+    match e.run_cycle(BufferCursor::At(0)).await.unwrap() {
         CycleOutcome::Produced {
             applied, rejected, ..
         } => {
@@ -316,7 +468,7 @@ async fn pass_2_is_not_offered_the_voices_as_known_subjects() {
         FakeLibrary::new(),
         FakeArtifacts::new(),
     );
-    e.run_cycle(0).await.unwrap();
+    e.run_cycle(BufferCursor::At(0)).await.unwrap();
 
     let calls = e.generator().pass2_calls.lock().unwrap();
     let (_, known) = calls.first().expect("pass 2 was called");
@@ -381,7 +533,7 @@ async fn a_male_character_is_re_cast_to_a_male_voice_before_the_render() {
     // Kaelen speaks first, so the round-robin hands him `azure:f1`. The hint corrects it.
     let extraction = extraction_with(vec![], vec![gendered_lore("Kaelen", "male")]);
     let e = gendered_engine(FakeGenerator::new().with_extraction(extraction));
-    e.run_cycle(0).await.unwrap();
+    e.run_cycle(BufferCursor::At(0)).await.unwrap();
 
     let cast = e.cast_pairs();
     let kaelen = cast
@@ -403,13 +555,116 @@ async fn a_male_character_is_re_cast_to_a_male_voice_before_the_render() {
     }
 }
 
+/// The case `new_lore` could never cover: Kaelen is named in the premise, so he is never
+/// "newly introduced", and three live runs produced `0 lore rows`. `speakers` reports whoever
+/// spoke, so the hint arrives on every chapter — including chapter one, for the protagonist.
+#[tokio::test]
+async fn a_speakers_gender_hint_re_casts_without_any_new_lore() {
+    let extraction = extraction_with_speakers(&[("Kaelen", Some("male"))]);
+    assert!(
+        extraction.new_lore.is_empty(),
+        "this must work with no lore rows at all"
+    );
+
+    let e = gendered_engine(FakeGenerator::new().with_extraction(extraction));
+    e.run_cycle(BufferCursor::At(0)).await.unwrap();
+
+    let cast = e.cast_pairs();
+    let kaelen = cast.iter().find(|(s, _)| s == "Kaelen").unwrap();
+    assert!(
+        kaelen.1.starts_with("azure:m"),
+        "Kaelen is male and drew {}",
+        kaelen.1
+    );
+    for seg in e.segments(1).iter().filter(|s| s.speaker == "Kaelen") {
+        assert_eq!(seg.voice_ref, kaelen.1);
+    }
+}
+
+#[tokio::test]
+async fn a_speaker_without_a_gender_is_left_alone() {
+    let e = gendered_engine(
+        FakeGenerator::new().with_extraction(extraction_with_speakers(&[("Kaelen", None)])),
+    );
+    e.run_cycle(BufferCursor::At(0)).await.unwrap();
+    assert_eq!(
+        e.cast_pairs()
+            .iter()
+            .find(|(s, _)| s == "Kaelen")
+            .unwrap()
+            .1,
+        "azure:f1",
+        "an absent hint must be inert"
+    );
+}
+
+#[tokio::test]
+async fn new_lore_wins_over_speakers_when_they_disagree() {
+    // `new_lore` is the specific case -- a character the chapter describes in detail -- so it
+    // takes precedence over the general speaker listing.
+    let mut extraction = extraction_with_speakers(&[("Kaelen", Some("female"))]);
+    extraction.new_lore = vec![gendered_lore("Kaelen", "male")];
+
+    let e = gendered_engine(FakeGenerator::new().with_extraction(extraction));
+    e.run_cycle(BufferCursor::At(0)).await.unwrap();
+    assert!(
+        e.cast_pairs()
+            .iter()
+            .find(|(s, _)| s == "Kaelen")
+            .unwrap()
+            .1
+            .starts_with("azure:m"),
+        "the more specific hint should win"
+    );
+}
+
+#[tokio::test]
+async fn a_speaker_hint_matches_the_cast_name_case_insensitively() {
+    let e = gendered_engine(
+        FakeGenerator::new().with_extraction(extraction_with_speakers(&[("KAELEN", Some("male"))])),
+    );
+    e.run_cycle(BufferCursor::At(0)).await.unwrap();
+    assert!(
+        e.cast_pairs()
+            .iter()
+            .find(|(s, _)| s == "Kaelen")
+            .unwrap()
+            .1
+            .starts_with("azure:m")
+    );
+}
+
+#[tokio::test]
+async fn a_speaker_hint_for_a_voice_is_ignored() {
+    // The prompt forbids it, but `narrator` and `SYSTEM` must never be re-cast as characters
+    // even if the model lists them.
+    let e = gendered_engine(
+        FakeGenerator::new().with_extraction(extraction_with_speakers(&[
+            ("narrator", Some("male")),
+            ("SYSTEM", Some("female")),
+        ])),
+    );
+    e.run_cycle(BufferCursor::At(0)).await.unwrap();
+
+    let cast = e.cast_pairs();
+    assert_eq!(
+        cast.iter().find(|(s, _)| s == "narrator").unwrap().1,
+        "azure:narr",
+        "the narrator keeps its configured voice"
+    );
+    assert_eq!(
+        cast.iter().find(|(s, _)| s == "SYSTEM").unwrap().1,
+        "azure:sys"
+    );
+}
+
 #[tokio::test]
 async fn a_correct_guess_is_left_alone() {
     // The round-robin already gives the first speaker a female voice, so a female hint must
     // be a no-op rather than a needless re-draw.
     let extraction = extraction_with(vec![], vec![gendered_lore("Kaelen", "female")]);
     let e = gendered_engine(FakeGenerator::new().with_extraction(extraction));
-    e.run_cycle(0).await.unwrap();
+    e.run_cycle(BufferCursor::At(0)).await.unwrap();
 
     let cast = e.cast_pairs();
     let kaelen = cast.iter().find(|(s, _)| s == "Kaelen").unwrap();
@@ -420,14 +675,14 @@ async fn a_correct_guess_is_left_alone() {
 async fn no_hint_leaves_casting_exactly_as_it_was() {
     // The field is optional and a model that omits it must change nothing.
     let with_hint = gendered_engine(FakeGenerator::new());
-    with_hint.run_cycle(0).await.unwrap();
+    with_hint.run_cycle(BufferCursor::At(0)).await.unwrap();
     let baseline = with_hint.cast_pairs();
 
     let none = gendered_engine(FakeGenerator::new().with_extraction(extraction_with(
         vec![],
         vec![lore_row("Kaelen", "character", "kaelen")],
     )));
-    none.run_cycle(0).await.unwrap();
+    none.run_cycle(BufferCursor::At(0)).await.unwrap();
     assert_eq!(none.cast_pairs(), baseline, "an absent hint must be inert");
 }
 
@@ -435,7 +690,7 @@ async fn no_hint_leaves_casting_exactly_as_it_was() {
 async fn a_nonsense_gender_value_is_ignored_rather_than_mis_casting() {
     let extraction = extraction_with(vec![], vec![gendered_lore("Kaelen", "wizard")]);
     let e = gendered_engine(FakeGenerator::new().with_extraction(extraction));
-    e.run_cycle(0).await.unwrap();
+    e.run_cycle(BufferCursor::At(0)).await.unwrap();
     let cast = e.cast_pairs();
     assert_eq!(
         cast.iter().find(|(s, _)| s == "Kaelen").unwrap().1,
@@ -449,7 +704,7 @@ async fn a_gender_hint_on_a_place_is_ignored() {
     place.kind = "place".to_string();
     let e =
         gendered_engine(FakeGenerator::new().with_extraction(extraction_with(vec![], vec![place])));
-    e.run_cycle(0).await.unwrap();
+    e.run_cycle(BufferCursor::At(0)).await.unwrap();
     // Nothing was re-cast, and the place did not become a cast member.
     assert!(!e.cast_pairs().iter().any(|(s, _)| s == "The Ashen Vale"));
 }
@@ -480,7 +735,7 @@ async fn an_exhausted_gender_group_degrades_instead_of_stealing_or_panicking() {
             .with_prose(prose)
             .with_extraction(extraction),
     );
-    e.run_cycle(0).await.unwrap();
+    e.run_cycle(BufferCursor::At(0)).await.unwrap();
 
     let cast = e.cast_pairs();
     let voices: Vec<&String> = cast
@@ -508,7 +763,7 @@ async fn an_established_character_is_never_re_voiced_by_a_late_hint() {
     // Continuity: chapter 1 published Kaelen in a voice. A hint arriving in chapter 2 must not
     // rewrite what chapter 1's audio already sounds like.
     let e = gendered_engine(FakeGenerator::new());
-    e.run_cycle(u32::MAX).await.unwrap();
+    e.run_cycle(BufferCursor::Drain).await.unwrap();
     let before = e.cast_pairs();
 
     let e2 = Engine::with_shared_store(
@@ -522,7 +777,7 @@ async fn an_established_character_is_never_re_voiced_by_a_late_hint() {
         FakeArtifacts::new(),
         gendered_config(),
     );
-    e2.run_cycle(u32::MAX).await.unwrap();
+    e2.run_cycle(BufferCursor::Drain).await.unwrap();
 
     assert_eq!(
         e2.cast_pairs(),
@@ -553,7 +808,7 @@ async fn a_rejected_delta_does_not_abort_the_chapter() {
         FakeArtifacts::new(),
     );
 
-    match e.run_cycle(0).await.unwrap() {
+    match e.run_cycle(BufferCursor::At(0)).await.unwrap() {
         CycleOutcome::Produced {
             chapter,
             applied,
@@ -599,7 +854,7 @@ async fn placeholder_values_are_refused_rather_than_recorded_as_fact() {
         FakeArtifacts::new(),
     );
 
-    match e.run_cycle(0).await.unwrap() {
+    match e.run_cycle(BufferCursor::At(0)).await.unwrap() {
         CycleOutcome::Produced {
             applied, rejected, ..
         } => {
@@ -638,7 +893,7 @@ async fn a_delta_with_an_illegal_op_is_counted_not_crashed_on() {
         FakeLibrary::new(),
         FakeArtifacts::new(),
     );
-    match e.run_cycle(0).await.unwrap() {
+    match e.run_cycle(BufferCursor::At(0)).await.unwrap() {
         CycleOutcome::Produced {
             rejected,
             has_audio,
@@ -664,7 +919,7 @@ async fn a_failed_extraction_still_ships_the_chapter_as_state_dirty() {
         FakeArtifacts::new(),
     );
 
-    match e.run_cycle(0).await.unwrap() {
+    match e.run_cycle(BufferCursor::At(0)).await.unwrap() {
         CycleOutcome::Produced {
             chapter,
             state_dirty,
@@ -703,7 +958,7 @@ async fn extraction_is_retried_with_jitter_before_giving_up() {
         FakeLibrary::new(),
         FakeArtifacts::new(),
     );
-    e.run_cycle(0).await.unwrap();
+    e.run_cycle(BufferCursor::At(0)).await.unwrap();
     assert_eq!(
         e.generator().pass2_count(),
         litrpg_engine::PASS2_TEMPERATURES.len(),
@@ -723,7 +978,7 @@ async fn a_transport_failure_on_extraction_gives_up_immediately() {
         FakeLibrary::new(),
         FakeArtifacts::new(),
     );
-    let out = e.run_cycle(0).await.unwrap();
+    let out = e.run_cycle(BufferCursor::At(0)).await.unwrap();
     assert!(matches!(
         out,
         CycleOutcome::Produced {
@@ -746,7 +1001,7 @@ async fn a_successful_extraction_writes_the_summary() {
         FakeLibrary::new(),
         FakeArtifacts::new(),
     );
-    e.run_cycle(0).await.unwrap();
+    e.run_cycle(BufferCursor::At(0)).await.unwrap();
     let written = e.summaries_written();
     assert_eq!(written.len(), 1);
     assert_eq!(written[0].0, 1);
@@ -768,7 +1023,7 @@ async fn a_transport_failure_on_pass_1_abandons_the_cycle_and_asks_for_backoff()
         FakeArtifacts::new(),
     );
 
-    let out = e.run_cycle(0).await.unwrap();
+    let out = e.run_cycle(BufferCursor::At(0)).await.unwrap();
     match &out {
         CycleOutcome::Abandoned {
             chapter, backoff, ..
@@ -800,7 +1055,7 @@ async fn a_four_hundred_on_pass_1_is_not_retried() {
         FakeArtifacts::new(),
     );
 
-    match e.run_cycle(0).await.unwrap() {
+    match e.run_cycle(BufferCursor::At(0)).await.unwrap() {
         CycleOutcome::Abandoned { backoff, .. } => {
             assert!(
                 !backoff,
@@ -827,7 +1082,13 @@ async fn a_malformed_pass_1_is_retried_with_rising_temperature_then_succeeds() {
         FakeArtifacts::new(),
     );
 
-    assert_eq!(e.run_cycle(0).await.unwrap().produced_chapter(), Some(1));
+    assert_eq!(
+        e.run_cycle(BufferCursor::At(0))
+            .await
+            .unwrap()
+            .produced_chapter(),
+        Some(1)
+    );
     let temps = e.generator().pass1_temperatures();
     assert_eq!(temps.len(), 2);
     assert!(
@@ -846,7 +1107,7 @@ async fn empty_prose_exhausts_the_retries_and_then_abandons() {
         FakeArtifacts::new(),
     );
 
-    match e.run_cycle(0).await.unwrap() {
+    match e.run_cycle(BufferCursor::At(0)).await.unwrap() {
         CycleOutcome::Abandoned { backoff, .. } => assert!(!backoff),
         other => panic!("expected Abandoned, got {other:?}"),
     }
@@ -870,7 +1131,7 @@ async fn a_tts_failure_still_ships_the_text() {
         FakeArtifacts::new(),
     );
 
-    match e.run_cycle(0).await.unwrap() {
+    match e.run_cycle(BufferCursor::At(0)).await.unwrap() {
         CycleOutcome::Produced {
             chapter,
             has_audio,
@@ -901,7 +1162,7 @@ async fn an_artifact_write_failure_still_ships_the_text() {
         FakeArtifacts::failing_on("mp3"),
     );
 
-    match e.run_cycle(0).await.unwrap() {
+    match e.run_cycle(BufferCursor::At(0)).await.unwrap() {
         CycleOutcome::Produced { has_audio, .. } => assert!(!has_audio),
         other => panic!("expected Produced, got {other:?}"),
     }
@@ -922,7 +1183,7 @@ async fn a_renderer_returning_the_wrong_number_of_buffers_does_not_attach_audio(
         FakeLibrary::new(),
         FakeArtifacts::new(),
     );
-    match e.run_cycle(0).await.unwrap() {
+    match e.run_cycle(BufferCursor::At(0)).await.unwrap() {
         CycleOutcome::Produced { has_audio, .. } => assert!(!has_audio),
         other => panic!("expected Produced, got {other:?}"),
     }
@@ -943,7 +1204,7 @@ async fn a_chapter_left_without_audio_is_re_rendered_not_regenerated() {
         FakeLibrary::new(),
         FakeArtifacts::new(),
     );
-    e.run_cycle(0).await.unwrap();
+    e.run_cycle(BufferCursor::At(0)).await.unwrap();
     let text_before = e.chapter_text(1);
     assert!(!e.has_audio(1));
     let pass1_calls_before = e.generator().pass1_count();
@@ -959,7 +1220,7 @@ async fn a_chapter_left_without_audio_is_re_rendered_not_regenerated() {
         config(),
     );
 
-    match e2.run_cycle(0).await.unwrap() {
+    match e2.run_cycle(BufferCursor::At(0)).await.unwrap() {
         CycleOutcome::ResumedRender { chapter, has_audio } => {
             assert_eq!(chapter, 1);
             assert!(has_audio);
@@ -989,7 +1250,7 @@ async fn a_resumed_render_rebuilds_the_same_voices_from_the_persisted_cast() {
         FakeLibrary::new(),
         FakeArtifacts::new(),
     );
-    e.run_cycle(0).await.unwrap();
+    e.run_cycle(BufferCursor::At(0)).await.unwrap();
     let cast_before = e.cast_pairs();
 
     let e2 = Engine::with_shared_store(
@@ -1000,7 +1261,7 @@ async fn a_resumed_render_rebuilds_the_same_voices_from_the_persisted_cast() {
         FakeArtifacts::new(),
         config(),
     );
-    e2.run_cycle(0).await.unwrap();
+    e2.run_cycle(BufferCursor::At(0)).await.unwrap();
 
     assert_eq!(
         e2.cast_pairs(),
@@ -1035,8 +1296,8 @@ async fn resume_runs_before_the_buffer_check_so_a_stuck_chapter_cannot_be_starve
         FakeArtifacts::new(),
         cfg.clone(),
     );
-    e.run_cycle(0).await.unwrap(); // ch1, audio
-    e.run_cycle(0).await.unwrap(); // ch2, audio -> depth is now 2 == target
+    e.run_cycle(BufferCursor::At(0)).await.unwrap(); // ch1, audio
+    e.run_cycle(BufferCursor::At(0)).await.unwrap(); // ch2, audio -> depth is now 2 == target
 
     // `consumed_through = 2` frees the buffer so a third chapter is generated; its
     // render fails, leaving it text-only.
@@ -1048,7 +1309,13 @@ async fn resume_runs_before_the_buffer_check_so_a_stuck_chapter_cannot_be_starve
         FakeArtifacts::new(),
         cfg.clone(),
     );
-    assert_eq!(e.run_cycle(2).await.unwrap().produced_chapter(), Some(3));
+    assert_eq!(
+        e.run_cycle(BufferCursor::At(2))
+            .await
+            .unwrap()
+            .produced_chapter(),
+        Some(3)
+    );
     assert!(!e.has_audio(3));
 
     // Now the buffer is full again (chapters 1 and 2 both have audio, target 2), so a
@@ -1061,7 +1328,7 @@ async fn resume_runs_before_the_buffer_check_so_a_stuck_chapter_cannot_be_starve
         FakeArtifacts::new(),
         cfg,
     );
-    match e.run_cycle(0).await.unwrap() {
+    match e.run_cycle(BufferCursor::At(0)).await.unwrap() {
         CycleOutcome::ResumedRender { chapter, has_audio } => {
             assert_eq!(chapter, 3);
             assert!(has_audio);
@@ -1086,7 +1353,7 @@ async fn a_permanently_unrenderable_chapter_does_not_block_every_future_chapter(
 
     // Ten cycles against a renderer that never works.
     for _ in 0..10 {
-        e.run_cycle(u32::MAX).await.unwrap();
+        e.run_cycle(BufferCursor::Drain).await.unwrap();
     }
 
     assert!(
@@ -1110,7 +1377,7 @@ async fn a_hopeless_chapter_stops_being_retried_and_is_reported_as_stuck() {
     );
 
     for _ in 0..10 {
-        e.run_cycle(u32::MAX).await.unwrap();
+        e.run_cycle(BufferCursor::Drain).await.unwrap();
     }
 
     assert_eq!(
@@ -1132,8 +1399,8 @@ async fn a_recovered_render_clears_the_stuck_marker() {
         FakeLibrary::new(),
         FakeArtifacts::new(),
     );
-    e.run_cycle(u32::MAX).await.unwrap(); // ch1 text-only
-    e.run_cycle(u32::MAX).await.unwrap(); // resume fails once
+    e.run_cycle(BufferCursor::Drain).await.unwrap(); // ch1 text-only
+    e.run_cycle(BufferCursor::Drain).await.unwrap(); // resume fails once
     assert_eq!(e.resume_attempts(1), 1);
 
     // The backend comes back.
@@ -1146,7 +1413,7 @@ async fn a_recovered_render_clears_the_stuck_marker() {
         config(),
     );
     assert!(matches!(
-        e.run_cycle(0).await.unwrap(),
+        e.run_cycle(BufferCursor::At(0)).await.unwrap(),
         CycleOutcome::ResumedRender { chapter: 1, .. }
     ));
     assert_eq!(e.resume_attempts(1), 0, "a success must clear the counter");
@@ -1165,7 +1432,7 @@ async fn a_resume_replaces_segments_rather_than_duplicating_them() {
         FakeLibrary::new(),
         FakeArtifacts::new(),
     );
-    e.run_cycle(0).await.unwrap();
+    e.run_cycle(BufferCursor::At(0)).await.unwrap();
     assert_eq!(e.segment_count(1), 0, "a failed render attaches nothing");
 
     let e = Engine::with_shared_store(
@@ -1177,7 +1444,7 @@ async fn a_resume_replaces_segments_rather_than_duplicating_them() {
         config(),
     );
     assert!(matches!(
-        e.run_cycle(0).await.unwrap(),
+        e.run_cycle(BufferCursor::At(0)).await.unwrap(),
         CycleOutcome::ResumedRender { .. }
     ));
 
@@ -1186,7 +1453,13 @@ async fn a_resume_replaces_segments_rather_than_duplicating_them() {
     assert!(count_after_resume > 0);
 
     // The next cycle has nothing to resume, so it produces chapter 2 and leaves 1 alone.
-    assert_eq!(e.run_cycle(0).await.unwrap().produced_chapter(), Some(2));
+    assert_eq!(
+        e.run_cycle(BufferCursor::At(0))
+            .await
+            .unwrap()
+            .produced_chapter(),
+        Some(2)
+    );
     assert_eq!(
         e.segment_count(1),
         count_after_resume,
@@ -1209,7 +1482,7 @@ async fn a_director_note_reaches_the_prompt_and_is_consumed_exactly_once() {
     );
     e.insert_note("introduce a rival", "cli");
 
-    e.run_cycle(0).await.unwrap();
+    e.run_cycle(BufferCursor::At(0)).await.unwrap();
     assert!(
         e.generator()
             .all_pass1_prompts()
@@ -1228,7 +1501,7 @@ async fn a_director_note_reaches_the_prompt_and_is_consumed_exactly_once() {
         .all_pass1_prompts()
         .matches("introduce a rival")
         .count();
-    e.run_cycle(0).await.unwrap();
+    e.run_cycle(BufferCursor::At(0)).await.unwrap();
     let after = e
         .generator()
         .all_pass1_prompts()
@@ -1248,7 +1521,7 @@ async fn notes_are_consumed_even_when_the_render_fails() {
         FakeArtifacts::new(),
     );
     e.insert_note("give Sera a good line", "watch");
-    e.run_cycle(0).await.unwrap();
+    e.run_cycle(BufferCursor::At(0)).await.unwrap();
     assert_eq!(e.pending_note_count(), 0);
 }
 
@@ -1265,7 +1538,7 @@ async fn notes_are_not_consumed_when_pass_1_fails() {
         FakeArtifacts::new(),
     );
     e.insert_note("introduce a rival", "cli");
-    e.run_cycle(0).await.unwrap();
+    e.run_cycle(BufferCursor::At(0)).await.unwrap();
     assert_eq!(
         e.pending_note_count(),
         1,
@@ -1291,7 +1564,7 @@ async fn matched_lore_reaches_the_prompt_and_unmatched_lore_does_not() {
         FakeArtifacts::new(),
     );
 
-    e.run_cycle(0).await.unwrap();
+    e.run_cycle(BufferCursor::At(0)).await.unwrap();
     let prompt = e.generator().all_pass1_prompts();
     assert!(
         prompt.contains("Body of World Rules."),
@@ -1319,9 +1592,9 @@ async fn the_previous_chapters_prose_is_used_for_retrieval_but_never_sent_to_the
         FakeArtifacts::new(),
     );
 
-    e.run_cycle(0).await.unwrap(); // chapter 1 contains the marker
+    e.run_cycle(BufferCursor::At(0)).await.unwrap(); // chapter 1 contains the marker
     let prompts_after_one = e.generator().all_pass1_prompts();
-    e.run_cycle(0).await.unwrap(); // chapter 2 scans chapter 1's text
+    e.run_cycle(BufferCursor::At(0)).await.unwrap(); // chapter 2 scans chapter 1's text
 
     let chapter_two_prompt = e
         .generator()
@@ -1359,7 +1632,7 @@ async fn recent_summaries_reach_the_prompt_and_older_ones_are_dropped() {
         FakeLibrary::new().with_summaries(summaries),
         FakeArtifacts::new(),
     );
-    e.run_cycle(0).await.unwrap();
+    e.run_cycle(BufferCursor::At(0)).await.unwrap();
 
     let prompt = e.generator().all_pass1_prompts();
     for recent in 4..=8 {
@@ -1386,10 +1659,10 @@ async fn the_renderer_is_called_exactly_once_per_chapter() {
         FakeLibrary::new(),
         FakeArtifacts::new(),
     );
-    e.run_cycle(0).await.unwrap();
+    e.run_cycle(BufferCursor::At(0)).await.unwrap();
     assert_eq!(e.renderer().call_count(), 1);
 
-    e.run_cycle(u32::MAX).await.unwrap();
+    e.run_cycle(BufferCursor::Drain).await.unwrap();
     assert_eq!(e.renderer().call_count(), 2);
 }
 
@@ -1401,8 +1674,8 @@ async fn the_prompt_hash_is_stable_across_chapters_with_an_unchanged_prompt() {
         FakeLibrary::new(),
         FakeArtifacts::new(),
     );
-    e.run_cycle(u32::MAX).await.unwrap();
-    e.run_cycle(u32::MAX).await.unwrap();
+    e.run_cycle(BufferCursor::Drain).await.unwrap();
+    e.run_cycle(BufferCursor::Drain).await.unwrap();
     assert_eq!(
         e.prompt_hash(1),
         e.prompt_hash(2),
@@ -1423,7 +1696,7 @@ async fn the_persisted_manifest_matches_the_audio_exactly() {
         FakeLibrary::new(),
         FakeArtifacts::new(),
     );
-    e.run_cycle(0).await.unwrap();
+    e.run_cycle(BufferCursor::At(0)).await.unwrap();
 
     let segs = e.segments(1);
     assert!(!segs.is_empty());
@@ -1446,7 +1719,7 @@ async fn every_segment_gets_the_voice_its_speaker_was_cast_with() {
         FakeLibrary::new(),
         FakeArtifacts::new(),
     );
-    e.run_cycle(0).await.unwrap();
+    e.run_cycle(BufferCursor::At(0)).await.unwrap();
 
     let cast = e.cast_pairs();
     for s in e.segments(1) {
@@ -1484,7 +1757,7 @@ Kaelen adjusted the strap of his gauntlet, and the leather creaked.
         FakeLibrary::new(),
         FakeArtifacts::new(),
     );
-    e.run_cycle(0).await.unwrap();
+    e.run_cycle(BufferCursor::At(0)).await.unwrap();
 
     let segs = e.segments(1);
     let narration = segs

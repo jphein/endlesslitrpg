@@ -10,6 +10,7 @@ pub mod error;
 pub mod feed;
 pub mod media;
 pub mod notes;
+pub mod progress;
 pub mod range;
 pub mod state;
 pub mod version;
@@ -18,6 +19,7 @@ pub mod voices;
 use std::sync::Arc;
 
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::routing::{get, post};
 use litrpg_store::Store;
 use litrpg_tts::TtsRegistry;
@@ -116,7 +118,21 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/character", get(state::get_protagonist))
         .route("/api/character/{subject}", get(state::get_character))
         .route("/api/voices", get(voices::get_voices))
-        .route("/api/notes", post(notes::post_note))
+        // ── Mutating routes ─────────────────────────────────────────────────
+        // Both carry an explicit `DefaultBodyLimit`, which rejects **before** buffering.
+        // The in-handler length checks stay as the semantic bound; this is the resource
+        // bound, and only the layer prevents an unauthenticated LAN caller from making
+        // the daemon buffer axum's 2 MB default just to have it rejected afterwards.
+        .route(
+            "/api/notes",
+            post(notes::post_note).layer(DefaultBodyLimit::max(notes::MAX_NOTE_BODY_BYTES)),
+        )
+        .route(
+            "/api/progress",
+            get(progress::get_progress)
+                .put(progress::put_progress)
+                .layer(DefaultBodyLimit::max(progress::MAX_PROGRESS_BODY_BYTES)),
+        )
         // One handler for both extensions; it parses `NNNN.pcm` / `NNNN.mp3` itself,
         // which is also where path traversal is rejected (see `media::parse_media_name`).
         .route("/media/{name}", get(media::serve_media))

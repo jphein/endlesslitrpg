@@ -140,7 +140,9 @@ pub fn fixture() -> Fixture {
     assert_eq!(manifest.total_bytes(), CH1_PCM_LEN);
 
     store
-        .attach_audio(1, &manifest, "0001.pcm", "0001.mp3")
+        // Migration 004 dropped `pcm_path`/`mp3_path`: the filesystem is the authority,
+        // and `serve_media` derives `media_root/{n:04}.{ext}` itself.
+        .attach_audio(1, &manifest)
         .expect("attach audio");
 
     store
@@ -228,6 +230,24 @@ pub fn seed_ledger_store() -> Store {
     store
 }
 
+/// Ledger fixture with a caller-supplied TTS registry, so cast renderability can be
+/// tested against a known backend set.
+pub fn fixture_ledger_with_registry(registry: TtsRegistry) -> Fixture {
+    let media = TempDir::new().expect("temp media dir");
+    let cfg = Config::new(
+        "127.0.0.1:8093".parse::<SocketAddr>().unwrap(),
+        media.path(),
+    )
+    .with_story(StoryConfig {
+        protagonist: "Kael".to_string(),
+        ..StoryConfig::default()
+    });
+    let app = router(Arc::new(
+        AppState::new(seed_ledger_store(), cfg).with_tts(registry),
+    ));
+    Fixture { app, _media: media }
+}
+
 /// A store with ledger entries, for the state/character routes.
 pub fn fixture_with_ledger() -> Fixture {
     let media = TempDir::new().expect("temp media dir");
@@ -306,6 +326,75 @@ pub fn fixture_with_protagonist(protagonist: &str) -> Fixture {
     Fixture { app, _media: media }
 }
 
+/// Fixture with a story row and `total` chapters, the first `with_audio` of which have
+/// rendered audio. For the playback cursor.
+///
+/// Durations differ per chapter so a wrong-chapter bug cannot hide behind identical
+/// numbers.
+pub fn fixture_progress(total: u32, with_audio: u32) -> Fixture {
+    let media = TempDir::new().expect("temp media dir");
+    let store = Store::open_in_memory().expect("store");
+
+    store
+        .upsert_story(&litrpg_store::NewStory {
+            title: "The Sunken Vale".to_string(),
+            protagonist: "Kael".to_string(),
+            prompt_path: "story/prompt.md".to_string(),
+            prompt_hash: "cursorhash".to_string(),
+            target_words: 2000,
+        })
+        .expect("upsert story");
+
+    for n in 1..=total {
+        store
+            .insert_chapter(&NewChapter {
+                number: n,
+                title: format!("Chapter {n}"),
+                text_md: format!("Body of chapter {n}."),
+                prompt_hash: "cursorhash".to_string(),
+                state_dirty: false,
+            })
+            .expect("insert chapter");
+
+        if n <= with_audio {
+            // One segment, 1000 ms * n, so durations are distinguishable.
+            let manifest = Manifest::new(
+                n,
+                vec![Segment {
+                    idx: 0,
+                    speaker: "narrator".to_string(),
+                    kind: SpeakerKind::Narrator,
+                    voice_ref: "sherpa:piper-en_GB-cori:0".to_string(),
+                    text: format!("Chapter {n} narration."),
+                    start_ms: 0,
+                    end_ms: 1000 * n,
+                }],
+            );
+            store.attach_audio(n, &manifest).expect("attach audio");
+            std::fs::write(
+                media.path().join(format!("{n:04}.pcm")),
+                vec![0u8; manifest.total_bytes() as usize],
+            )
+            .expect("write pcm");
+            std::fs::write(media.path().join(format!("{n:04}.mp3")), vec![0xFFu8; 256])
+                .expect("write mp3");
+        }
+    }
+
+    let cfg = Config::new(
+        "127.0.0.1:8093".parse::<SocketAddr>().unwrap(),
+        media.path(),
+    )
+    .with_story(StoryConfig {
+        base_url: "http://10.0.6.107:8093".to_string(),
+        protagonist: "Kael".to_string(),
+        ..StoryConfig::default()
+    });
+
+    let app = router(Arc::new(AppState::new(store, cfg)));
+    Fixture { app, _media: media }
+}
+
 impl Fixture {
     pub async fn get(&self, uri: &str) -> Response<Body> {
         self.request(Request::builder().uri(uri).body(Body::empty()).unwrap())
@@ -325,9 +414,22 @@ impl Fixture {
     }
 
     pub async fn post_json(&self, uri: &str, body: serde_json::Value) -> Response<Body> {
+        self.json_request("POST", uri, body).await
+    }
+
+    pub async fn put_json(&self, uri: &str, body: serde_json::Value) -> Response<Body> {
+        self.json_request("PUT", uri, body).await
+    }
+
+    async fn json_request(
+        &self,
+        method: &str,
+        uri: &str,
+        body: serde_json::Value,
+    ) -> Response<Body> {
         self.request(
             Request::builder()
-                .method("POST")
+                .method(method)
                 .uri(uri)
                 .header("content-type", "application/json")
                 .body(Body::from(body.to_string()))

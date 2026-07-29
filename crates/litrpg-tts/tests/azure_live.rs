@@ -275,3 +275,183 @@ async fn every_curated_voice_actually_synthesizes() {
         failures.join("\n  ")
     );
 }
+
+// ------------------------------------------------- full-length chapter (the defect)
+
+/// The render that the first full-length chapter failed on.
+///
+/// Every earlier verification used short paragraphs, which is *why* the bug shipped:
+/// chapter 1's segment 2 is 3 665 chars = 203 s of audio in a single segment, and the
+/// old fixed 180 s client timeout could not cover it under four-way concurrency.
+///
+/// Uses the real `media/0001.json` manifest — 7 segments, 8 185 chars, ~452 s of
+/// sherpa-rendered audio — re-voiced onto the Azure cast.
+///
+/// ⚠️ **This spends real quota: ~8 200 characters of DragonHD synthesis.** It is the
+/// only thing that proves the fix, so it is worth running once after changes to
+/// chunking, splitting or timeouts — and not more often than that.
+#[tokio::test]
+#[ignore = "spends ~8200 chars of Azure quota; the full-length regression test"]
+async fn a_full_length_real_chapter_renders_without_timing_out() {
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../media/0001.json")
+        .canonicalize()
+        .expect("media/0001.json — run a chapter first");
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&manifest).unwrap()).unwrap();
+    let segs = json["segments"].as_array().unwrap();
+
+    // Re-voice the real chapter onto the Azure cast: narrator, and a distinct voice
+    // for SYSTEM, so this exercises multi-voice as well as length.
+    let reqs: Vec<RenderRequest> = segs
+        .iter()
+        .map(|s| {
+            let kind = match s["kind"].as_str().unwrap() {
+                "system" => SpeakerKind::System,
+                "character" => SpeakerKind::Character,
+                _ => SpeakerKind::Narrator,
+            };
+            let voice = match kind {
+                SpeakerKind::System => "azure:en-US-Steffan:DragonHDLatestNeural",
+                _ => "azure:en-GB-Ada:DragonHDLatestNeural",
+            };
+            req(
+                s["idx"].as_u64().unwrap() as u32,
+                voice,
+                s["text"].as_str().unwrap(),
+                kind,
+            )
+        })
+        .collect();
+
+    let total_chars: usize = reqs.iter().map(|r| r.text.chars().count()).sum();
+    let longest = reqs.iter().map(|r| r.text.chars().count()).max().unwrap();
+    eprintln!(
+        "\nfull chapter: {} segments, {total_chars} chars, longest segment {longest} chars",
+        reqs.len()
+    );
+    assert!(
+        longest > litrpg_tts::azure::MAX_CHARS_PER_REQUEST,
+        "this fixture must contain an over-budget segment to be a regression test \
+         (longest is {longest}, budget is {})",
+        litrpg_tts::azure::MAX_CHARS_PER_REQUEST
+    );
+
+    let b = backend();
+    let started = std::time::Instant::now();
+    // Per-segment isolation: nothing should fail, but a failure must not hide the rest.
+    let outcomes = b.render_batch_partial(&reqs).await;
+    let wall = started.elapsed();
+
+    assert_eq!(outcomes.len(), reqs.len());
+    let mut parts = Vec::new();
+    let mut failed = Vec::new();
+    for (r, o) in reqs.iter().zip(outcomes) {
+        match o {
+            Ok(pcm) => {
+                eprintln!(
+                    "  seg {:>2} {:>5} chars -> {:>9} B = {:>6.1} s",
+                    r.idx,
+                    r.text.chars().count(),
+                    pcm.len(),
+                    pcm.duration_secs_f64()
+                );
+                parts.push(pcm);
+            }
+            Err(e) => {
+                eprintln!("  seg {:>2} FAILED: {e}", r.idx);
+                failed.push(format!("segment {}: {e}", r.idx));
+            }
+        }
+    }
+    assert!(
+        failed.is_empty(),
+        "segments failed:\n  {}",
+        failed.join("\n  ")
+    );
+
+    let chapter = Pcm16k::concat(&parts);
+    let audio_secs = chapter.duration_secs_f64();
+    eprintln!(
+        "chapter: {} B = {audio_secs:.1} s audio in {:.1} s wall ({:.2}x realtime)",
+        chapter.len(),
+        wall.as_secs_f64(),
+        audio_secs / wall.as_secs_f64()
+    );
+
+    // The byte contract still holds over a full chapter with split segments.
+    assert!(chapter.is_whole_ms());
+    assert_eq!(chapter.len() as u32, chapter.duration_ms() * 32);
+    assert_eq!(
+        chapter.len() as f64,
+        32_000.0 * (chapter.duration_ms() as f64 / 1000.0)
+    );
+    // A real chapter, not a test paragraph.
+    assert!(
+        audio_secs > 300.0,
+        "expected >5 min of audio, got {audio_secs:.1} s — is this a real chapter?"
+    );
+    // No segment came back empty or silent.
+    for (i, p) in parts.iter().enumerate() {
+        assert!(!p.is_empty(), "segment {i} empty");
+        assert!(peak(p) > 500, "segment {i} silent");
+    }
+}
+
+/// `render_joined` across **several** chunks, proven with a deliberately tiny budget
+/// rather than a long text — so the multi-request path is exercised for ~60 chars of
+/// quota instead of thousands.
+#[tokio::test]
+#[ignore = "spends Azure quota (~60 chars)"]
+async fn render_joined_chunks_across_multiple_requests() {
+    let reqs = vec![
+        req(
+            0,
+            "azure:en-GB-Ada:DragonHDLatestNeural",
+            "She turned to go.",
+            SpeakerKind::Narrator,
+        ),
+        req(
+            1,
+            "azure:en-US-Ava:DragonHDLatestNeural",
+            "\"Don't.\"",
+            SpeakerKind::Character,
+        ),
+        req(
+            2,
+            "azure:en-GB-Ada:DragonHDLatestNeural",
+            "The gate held.",
+            SpeakerKind::Narrator,
+        ),
+    ];
+    let total: usize = reqs.iter().map(|r| r.text.chars().count()).sum();
+
+    // One chunk (default budget) vs forced multi-chunk.
+    let one = backend().render_joined(&reqs).await.unwrap();
+    let many = backend()
+        .with_max_chars_per_request(12) // forces a request per segment
+        .render_joined(&reqs)
+        .await
+        .unwrap();
+
+    eprintln!(
+        "joined: {total} chars | 1 chunk = {} B ({:.2} s) | forced multi-chunk = {} B ({:.2} s)",
+        one.len(),
+        one.duration_secs_f64(),
+        many.len(),
+        many.duration_secs_f64()
+    );
+
+    for pcm in [&one, &many] {
+        assert!(!pcm.is_empty());
+        assert!(pcm.is_whole_ms());
+        assert_eq!(pcm.len() as u32, pcm.duration_ms() * 32);
+        assert!(peak(pcm) > 1_000, "joined stream looks like silence");
+    }
+    // Chunking must not lose or duplicate speech: same text, so similar duration.
+    let ratio = many.duration_secs_f64() / one.duration_secs_f64();
+    assert!(
+        (0.7..1.4).contains(&ratio),
+        "chunked total diverges from single-request total: {ratio:.2}x"
+    );
+}

@@ -27,8 +27,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use litrpg_engine::{
-    CycleOutcome, EmberGenerator, Engine, EngineConfig, FsArtifacts, RegistryRenderer,
-    StoreLibrary, voices::plan_voices,
+    BufferCursor, CycleOutcome, EmberGenerator, Engine, EngineConfig, FsArtifacts,
+    RegistryRenderer, StoreLibrary, voices::plan_voices,
 };
 use litrpg_store::Store;
 use litrpg_tts::{TtsBackend, TtsRegistry, azure::AzureBackend};
@@ -86,10 +86,12 @@ OPTIONS:
     --poll-secs <S>      Seconds to sleep between cycles (default 45).
                          Also LITRPG_POLL_SECS.
     --consumed-through <N>
-                         Highest chapter the listener has finished, for the
-                         rendered-ahead buffer. Default 0.
-    --drain              Treat the buffer as always empty, so generation never
-                         idles. Stand-in until a playback cursor exists.
+                         Override the stored playback cursor for this run. By
+                         default the cursor is read from the database every
+                         cycle, so the daemon notices when someone listens.
+    --drain              Ignore the cursor: treat the buffer as always empty so
+                         generation never idles. For backfilling a story, or
+                         filling a buffer ahead of a listener.
     -h, --help           Show this message.
 
 ENVIRONMENT:
@@ -108,7 +110,7 @@ struct Args {
     drain: bool,
     chapters: Option<u32>,
     poll_secs: Option<u64>,
-    consumed_through: u32,
+    consumed_through: Option<u32>,
 }
 
 impl Args {
@@ -140,9 +142,10 @@ impl Args {
                 }
                 "--consumed-through" => {
                     let v = value("--consumed-through")?;
-                    a.consumed_through = v
-                        .parse()
-                        .map_err(|_| format!("--consumed-through {v:?} is not a number"))?;
+                    a.consumed_through = Some(
+                        v.parse()
+                            .map_err(|_| format!("--consumed-through {v:?} is not a number"))?,
+                    );
                 }
                 other => return Err(format!("unknown argument {other:?}")),
             }
@@ -187,7 +190,7 @@ async fn run(args: Args) -> Result<ExitCode, Box<dyn std::error::Error>> {
 
     // ---- store + story row -------------------------------------------------
     let store = Arc::new(Mutex::new(Store::open(&config.db_path)?));
-    let library = StoreLibrary::new(Arc::clone(&store));
+    let library = StoreLibrary::new(Arc::clone(&store), &config.story_dir);
     // Fails with "run `litrpg init` first" when the story row or prompt file is missing.
     let story = litrpg_engine::Library::story(&library)?;
     info!(
@@ -270,6 +273,9 @@ async fn run(args: Args) -> Result<ExitCode, Box<dyn std::error::Error>> {
         system_voice: plan.system,
         character_voices: plan.characters,
         voice_genders,
+        // So a `cast` row naming an unloaded backend is substituted rather than costing the
+        // chapter's audio.
+        renderable_backends: ready.clone(),
         ..base
     };
 
@@ -356,21 +362,22 @@ async fn one_cycle(
     engine: &LiveEngine,
     args: &Args,
 ) -> Result<CycleOutcome, Box<dyn std::error::Error>> {
-    let consumed = consumed_through(engine, args)?;
-    Ok(engine.run_cycle(consumed).await?)
+    Ok(engine.run_cycle(cursor(args)).await?)
 }
 
-/// The buffer baseline.
+/// Which buffer baseline this run uses.
 ///
-/// `--drain` reports the latest chapter as consumed, which makes the buffer permanently empty
-/// so generation never idles. It is a **stand-in for the missing playback cursor** (§6 has no
-/// table for what has been listened to), not a feature: with no cursor the honest default is
-/// `0`, under which the engine correctly stops once the buffer is full.
-fn consumed_through(engine: &LiveEngine, args: &Args) -> Result<u32, Box<dyn std::error::Error>> {
+/// [`BufferCursor::Stored`] is the default, and the engine re-reads it **every cycle** — so
+/// marking a chapter consumed while the daemon is running takes effect at the next turn rather
+/// than at the next restart. `--drain` and `--consumed-through` override it.
+fn cursor(args: &Args) -> BufferCursor {
     if args.drain {
-        Ok(engine.with_store(|s| s.latest_number())?)
+        // The stronger claim of the two: ignore the cursor entirely.
+        BufferCursor::Drain
+    } else if let Some(n) = args.consumed_through {
+        BufferCursor::At(n)
     } else {
-        Ok(args.consumed_through)
+        BufferCursor::Stored
     }
 }
 
@@ -379,7 +386,7 @@ async fn loop_until_signal(engine: &LiveEngine, args: &Args, config_poll_secs: u
     info!(
         poll_secs = interval.as_secs(),
         chapters = ?args.chapters,
-        drain = args.drain,
+        cursor = ?cursor(args),
         "entering the chapter loop; SIGINT or SIGTERM to stop"
     );
 
@@ -497,10 +504,27 @@ mod tests {
     }
 
     #[test]
-    fn no_arguments_means_loop_forever() {
+    fn no_arguments_means_loop_forever_against_the_stored_cursor() {
         let a = parse(&[]).unwrap();
         assert!(!a.once && !a.drain && a.chapters.is_none());
-        assert_eq!(a.consumed_through, 0);
+        assert_eq!(a.consumed_through, None);
+        assert_eq!(cursor(&a), BufferCursor::Stored);
+    }
+
+    #[test]
+    fn the_cursor_is_chosen_by_the_flags() {
+        // Default reads the database each cycle; the flags override it.
+        assert_eq!(cursor(&parse(&[]).unwrap()), BufferCursor::Stored);
+        assert_eq!(
+            cursor(&parse(&["--consumed-through", "7"]).unwrap()),
+            BufferCursor::At(7)
+        );
+        assert_eq!(cursor(&parse(&["--drain"]).unwrap()), BufferCursor::Drain);
+        // `--drain` is the stronger claim, so it wins.
+        assert_eq!(
+            cursor(&parse(&["--consumed-through", "7", "--drain"]).unwrap()),
+            BufferCursor::Drain
+        );
     }
 
     #[test]
@@ -511,7 +535,7 @@ mod tests {
         assert_eq!(a.poll_secs, Some(10));
 
         let a = parse(&["--consumed-through", "12"]).unwrap();
-        assert_eq!(a.consumed_through, 12);
+        assert_eq!(a.consumed_through, Some(12));
     }
 
     #[test]

@@ -457,3 +457,175 @@ fn multitalker_and_novelty_ids_are_not_in_the_pool() {
         );
     }
 }
+
+// ------------------------------------------- long-segment splitting & timeouts
+
+use litrpg_tts::azure::{MAX_CHARS_PER_REQUEST, split_for_requests, timeout_for_chars};
+
+#[test]
+fn short_text_is_never_split() {
+    let parts = split_for_requests("One sentence only.", MAX_CHARS_PER_REQUEST);
+    assert_eq!(parts, vec!["One sentence only."]);
+}
+
+#[test]
+fn empty_text_yields_no_parts() {
+    assert!(split_for_requests("", MAX_CHARS_PER_REQUEST).is_empty());
+    assert!(split_for_requests("   ", MAX_CHARS_PER_REQUEST).is_empty());
+}
+
+#[test]
+fn a_long_segment_splits_at_sentence_boundaries() {
+    // The real defect: chapter 1 segment 2 is 3665 chars = 203 s of audio in ONE
+    // request. Splitting between segments cannot help — it *is* one segment.
+    let sentence = "The ash did not fall but hovered in the still air. ";
+    let text = sentence.repeat(40); // ~2000 chars
+    let parts = split_for_requests(&text, 500);
+
+    assert!(parts.len() > 1, "should have split");
+    for p in &parts {
+        assert!(
+            p.chars().count() <= 500,
+            "part too long: {}",
+            p.chars().count()
+        );
+        assert!(!p.trim().is_empty());
+        // Every part ends on a sentence boundary, so a join lands where a reader
+        // would naturally pause.
+        assert!(
+            p.trim_end().ends_with('.'),
+            "part does not end at a sentence: {:?}",
+            &p[p.len().saturating_sub(40)..]
+        );
+    }
+    // Nothing lost, nothing duplicated.
+    let rejoined: String = parts.join(" ");
+    let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert_eq!(norm(&rejoined), norm(&text));
+}
+
+#[test]
+fn sentence_terminators_other_than_period_are_honoured() {
+    let text = "Who goes there? Nobody answered! The gate held. Then it did not.";
+    let parts = split_for_requests(text, 25);
+    assert!(parts.len() >= 3, "got {parts:?}");
+    for p in &parts {
+        let t = p.trim_end();
+        assert!(
+            t.ends_with('.') || t.ends_with('?') || t.ends_with('!'),
+            "not a sentence end: {t:?}"
+        );
+    }
+}
+
+#[test]
+fn a_sentence_longer_than_the_budget_falls_back_to_word_boundaries() {
+    // Dialogue can be one very long sentence; splitting mid-word would be audible.
+    let text = "word ".repeat(200); // 1000 chars, no sentence terminator at all
+    let parts = split_for_requests(&text, 100);
+    assert!(parts.len() > 1);
+    for p in &parts {
+        assert!(p.chars().count() <= 100);
+        // No part starts or ends mid-word.
+        assert!(!p.starts_with(' ') && !p.ends_with(' '), "{p:?}");
+        assert!(
+            p.split_whitespace().all(|w| w == "word"),
+            "split mid-word: {p:?}"
+        );
+    }
+}
+
+#[test]
+fn a_single_unbreakable_token_is_emitted_rather_than_dropped() {
+    // Pathological input must not vanish silently; better a too-long request that
+    // Azure may reject than a segment that is quietly missing from the chapter.
+    let text = "a".repeat(300);
+    let parts = split_for_requests(&text, 100);
+    assert_eq!(parts.concat().replace(' ', ""), text);
+}
+
+#[test]
+fn splitting_preserves_every_character_of_real_chapter_prose() {
+    let text = "The weight of the Ledger against his hip was a constant, dull pressure. \
+                \"The third one is giving way,\" Kaelen said, his voice rough from disuse. \
+                She didn't look at him. \"That's why we're here.\" Compounded daily.";
+    for budget in [40, 80, 120, 500] {
+        let parts = split_for_requests(text, budget);
+        let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert_eq!(
+            norm(&parts.join(" ")),
+            norm(text),
+            "budget {budget} lost or duplicated text"
+        );
+    }
+}
+
+#[test]
+fn the_request_budget_is_well_under_azures_ten_minute_audio_limit() {
+    // Measured: 0.0757 s of audio per character. Azure's REST endpoint caps a single
+    // request at 10 minutes of output.
+    let max_audio_secs = MAX_CHARS_PER_REQUEST as f64 * 0.0757;
+    assert!(
+        max_audio_secs < 300.0,
+        "a full request would be {max_audio_secs:.0} s of audio; too close to the 600 s cap"
+    );
+}
+
+#[test]
+fn the_timeout_scales_with_the_work_and_has_a_floor() {
+    // Measured rate is ~34 ms/char (30 chars/s, 2.27x realtime), consistent across
+    // 600 / 1600 / 3665-char requests. The timeout must sit generously above that,
+    // because up to BATCH_CONCURRENCY requests share throughput and each one's clock
+    // runs while the others are in flight.
+    let tiny = timeout_for_chars(1);
+    let small = timeout_for_chars(600);
+    let big = timeout_for_chars(MAX_CHARS_PER_REQUEST);
+
+    assert!(tiny.as_secs() >= 20, "floor too low: {tiny:?}");
+    assert!(small > tiny && big > small, "must scale with work");
+
+    // Generous vs measured solo time, with room for concurrency contention.
+    let measured_solo = |chars: u64| chars * 34 / 1000;
+    for chars in [600u64, 1200, MAX_CHARS_PER_REQUEST as u64] {
+        let budget = timeout_for_chars(chars as usize).as_secs();
+        let solo = measured_solo(chars);
+        assert!(
+            budget >= solo * 3,
+            "{chars} chars: budget {budget}s is under 3x the measured {solo}s"
+        );
+    }
+}
+
+#[test]
+fn the_old_fixed_180s_timeout_would_not_have_covered_the_failing_segment() {
+    // Regression anchor. Chapter 1 segment 2 was 3665 chars; solo it measures ~122 s,
+    // but four concurrent requests pushed it past the fixed 180 s ceiling. Under the
+    // new scheme that segment is split into several requests, each with its own
+    // scaled budget.
+    let parts = split_for_requests(&"Sentence here. ".repeat(250), MAX_CHARS_PER_REQUEST);
+    assert!(
+        parts.len() > 1,
+        "3750 chars must split into multiple requests"
+    );
+
+    // Each part's budget must generously cover that part's own measured solo time.
+    // A small trailing remainder legitimately gets a small budget — the floor is what
+    // keeps it sane, not a fixed minimum per part.
+    for p in &parts {
+        let chars = p.chars().count();
+        let budget = timeout_for_chars(chars).as_secs();
+        let solo = chars as u64 * 34 / 1000;
+        assert!(
+            budget >= solo * 3 + 20,
+            "{chars} chars: budget {budget}s vs measured solo {solo}s"
+        );
+    }
+
+    // And the whole segment, if it were still sent as one request, would now get far
+    // more than the 180 s that failed.
+    let whole = timeout_for_chars(3_665).as_secs();
+    assert!(
+        whole > 180,
+        "a 3665-char request would still be capped at {whole}s"
+    );
+}

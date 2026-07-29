@@ -175,6 +175,25 @@ async fn pass_2_extraction_round_trips_against_the_live_model() {
     );
 }
 
+/// # This test is known to be flaky. Do not treat a failure as a fresh regression.
+///
+/// It failed once on 2026-07-29 and passed on every run before and after; the assertion was not
+/// captured before it went green, so the cause is unknown. Pass 1 is sampled at temperature 0.9
+/// against a live model, so **non-determinism is expected by design** — the chapter's shape,
+/// speaker count and tag discipline vary run to run.
+///
+/// What the assertions actually guarantee is only the floor the renderer needs:
+///
+/// * more than one segment, so the chapter is not one undivided block;
+/// * no empty segment, because that would render as silence;
+/// * at least one narrator and one character, so the multi-voice cast (D3) is exercised;
+/// * no tag markup left in text bound for TTS;
+/// * dense, zero-based indices, so a manifest can be built straight from them.
+///
+/// A failure means the model produced output violating one of those, which is worth *reading*
+/// (the raw output is printed above the panic) rather than assuming the parser broke. One
+/// observed near-miss: the model satisfied "every chapter needs a `[SYSTEM]` block" with a bare
+/// `[SYSTEM]` and no content — handled, and pinned by `parse_table.rs`.
 #[tokio::test]
 #[ignore = "requires Ember on familiar:8091"]
 async fn pass_1_output_parses_into_usable_segments() {

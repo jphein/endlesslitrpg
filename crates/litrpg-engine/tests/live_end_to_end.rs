@@ -30,7 +30,8 @@ use std::sync::{Arc, Mutex};
 
 use litrpg_core::BYTES_PER_MS;
 use litrpg_engine::{
-    CycleOutcome, EmberGenerator, Engine, EngineConfig, FsArtifacts, RegistryRenderer, StoreLibrary,
+    BufferCursor, CycleOutcome, EmberGenerator, Engine, EngineConfig, FsArtifacts,
+    RegistryRenderer, StoreLibrary,
 };
 use litrpg_store::{NewStory, Store};
 use litrpg_tts::{TtsBackend, TtsRegistry, azure::AzureBackend};
@@ -135,7 +136,7 @@ async fn one_real_chapter_end_to_end() {
         eprintln!("  {id}: ready={} ({:?})", avail.is_ready(), avail.reason());
     }
 
-    let library = StoreLibrary::new(Arc::clone(&store));
+    let library = StoreLibrary::new(Arc::clone(&store), dir.path());
     let artifacts = FsArtifacts::new(&media_dir);
 
     let config = EngineConfig {
@@ -147,6 +148,7 @@ async fn one_real_chapter_end_to_end() {
         // Gender metadata straight from the registry, so a pass-2 gender hint is matched
         // against what Azure actually advertises.
         voice_genders: registry_genders(&registry),
+        renderable_backends: registry.ids().iter().map(|s| s.to_string()).collect(),
         summary_window: 5,
     };
 
@@ -160,7 +162,10 @@ async fn one_real_chapter_end_to_end() {
     );
 
     // ---- one cycle ---------------------------------------------------------
-    let outcome = engine.run_cycle(0).await.expect("cycle should not error");
+    let outcome = engine
+        .run_cycle(BufferCursor::At(0))
+        .await
+        .expect("cycle should not error");
     eprintln!("\n=== outcome: {outcome:?}\n");
 
     let (chapter, has_audio, state_dirty, applied, rejected) = match outcome {
@@ -270,6 +275,44 @@ async fn one_real_chapter_end_to_end() {
                         d.subject, d.field, d.op, d.value_num, d.value_txt
                     );
                 }
+                eprintln!("--- pass 2 reported {} speakers:", e.speakers.len());
+                for sp in &e.speakers {
+                    eprintln!(
+                        "      {:<14} gender={:?} hint={:?}",
+                        sp.name,
+                        sp.gender,
+                        sp.gender_hint()
+                    );
+                }
+                // Whatever the round-robin drew, the published cast must agree with every
+                // gender hint the model supplied — either because the draw was already right or
+                // because `regender` corrected it. This is the end-to-end check; the correction
+                // itself is unit-tested, since whether it fires depends on who speaks first.
+                let genders = registry_genders(engine.renderer().registry());
+                let cast = engine.with_store(|s| s.cast()).expect("cast");
+                for sp in &e.speakers {
+                    let Some(hint) = sp.gender_hint() else {
+                        continue;
+                    };
+                    let Some(want) = litrpg_engine::cast::parse_gender(hint) else {
+                        continue;
+                    };
+                    let Some((_, voice)) = cast
+                        .iter()
+                        .map(|c| (c.speaker.as_str(), c.voice_ref.as_str()))
+                        .find(|(name, _)| name.eq_ignore_ascii_case(sp.name.trim()))
+                    else {
+                        continue; // listed but never actually tagged as a speaker
+                    };
+                    if let Some(actual) = genders.get(voice) {
+                        assert_eq!(
+                            *actual, want,
+                            "{} is {hint} but was cast as {voice}",
+                            sp.name
+                        );
+                    }
+                }
+
                 eprintln!("--- pass 2 proposed {} lore rows:", e.new_lore.len());
                 for l in &e.new_lore {
                     eprintln!(
@@ -310,8 +353,8 @@ async fn one_real_chapter_end_to_end() {
         "--- audio: duration_ms={} segments={} pcm={:?} mp3={:?}",
         row.duration_ms,
         segments.len(),
-        row.pcm_path,
-        row.mp3_path
+        media_dir.join("0001.pcm").display(),
+        media_dir.join("0001.mp3").display()
     );
 
     assert!(!segments.is_empty(), "audio implies segment rows");
@@ -333,7 +376,9 @@ async fn one_real_chapter_end_to_end() {
 
     // The invariant the whole watch playback path rests on, checked against the bytes
     // actually on disk rather than against anything we computed.
-    let pcm_path = row.pcm_path.expect("pcm_path must be set when has_audio");
+    // Derived, not read from the row: migration 004 dropped those columns because
+    // `media_dir/NNNN.{pcm,mp3}` is the layout and a stored path could only restate it.
+    let pcm_path = media_dir.join("0001.pcm");
     let pcm_bytes = std::fs::read(&pcm_path).expect("read pcm");
     eprintln!(
         "--- pcm on disk: {} bytes; duration_ms * 32 = {}",
@@ -357,10 +402,10 @@ async fn one_real_chapter_end_to_end() {
     }
 
     // ---- artifacts ---------------------------------------------------------
-    let mp3_path = row.mp3_path.expect("mp3_path must be set when has_audio");
+    let mp3_path = media_dir.join("0001.mp3");
     let mp3 = std::fs::metadata(&mp3_path).expect("mp3 must exist on disk");
     assert!(mp3.len() > 0, "the mp3 is empty");
-    eprintln!("--- mp3: {} bytes at {mp3_path}", mp3.len());
+    eprintln!("--- mp3: {} bytes at {}", mp3.len(), mp3_path.display());
 
     let manifest_path = media_dir.join("0001.json");
     let manifest_json = std::fs::read_to_string(&manifest_path).expect("manifest must exist");
@@ -479,7 +524,7 @@ async fn a_second_cycle_never_rewrites_published_prose() {
         Arc::clone(&store),
         EmberGenerator::from_config(&ember_config()).expect("ember"),
         RegistryRenderer::new(TtsRegistry::new().with(Box::new(azure))),
-        StoreLibrary::new(Arc::clone(&store)),
+        StoreLibrary::new(Arc::clone(&store), dir.path()),
         FsArtifacts::new(dir.path().join("media")),
         EngineConfig {
             buffer_target: 1,
@@ -488,18 +533,25 @@ async fn a_second_cycle_never_rewrites_published_prose() {
             system_voice: AZURE_SYSTEM.to_string(),
             character_voices: AZURE_CHARACTERS.iter().map(|s| s.to_string()).collect(),
             voice_genders: Default::default(),
+            renderable_backends: vec!["azure".to_string()],
             summary_window: 5,
         },
     );
 
-    let first = engine.run_cycle(0).await.expect("first cycle");
+    let first = engine
+        .run_cycle(BufferCursor::At(0))
+        .await
+        .expect("first cycle");
     assert_eq!(first.produced_chapter(), Some(1), "got {first:?}");
 
     let after_first = engine.with_store(|s| s.chapter(1)).expect("chapter 1");
     let first_had_audio = after_first.has_audio;
     eprintln!("first cycle: has_audio={first_had_audio}");
 
-    let second = engine.run_cycle(0).await.expect("second cycle");
+    let second = engine
+        .run_cycle(BufferCursor::At(0))
+        .await
+        .expect("second cycle");
     eprintln!("second cycle: {second:?}");
 
     // The assertion that matters, and it holds regardless of the audio path.

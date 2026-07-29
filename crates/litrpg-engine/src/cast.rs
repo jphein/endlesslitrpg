@@ -235,7 +235,8 @@ impl VoiceAssigner {
     /// rewrite continuity for every chapter they have already appeared in — the cast is
     /// permanent by design, and a late-arriving hint is not a reason to break that.
     ///
-    /// `wanted` maps speaker name to `"male" | "female" | "neutral"`. Returns only the rows
+    /// `wanted` maps speaker name to `"male" | "female" | "neutral"`, matched
+    /// **case-insensitively**, so the caller may key it however it likes. Returns only the rows
     /// that changed.
     pub fn regender(
         &self,

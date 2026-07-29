@@ -22,5 +22,6 @@ default = []
 sherpa = ["dep:sherpa-rs"]
 
 [dev-dependencies]
+serde_json = { workspace = true, features = ["std"] }
 tokio = { workspace = true, features = ["test-util"] }
 proptest = { workspace = true }

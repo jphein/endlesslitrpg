@@ -54,7 +54,7 @@ pub const EXTRACTION_SCHEMA_NAME: &str = "chapter_extraction";
 pub const EXTRACTION_SCHEMA: &str = r#"{
   "type": "object",
   "additionalProperties": false,
-  "required": ["summary", "title", "deltas", "new_lore", "quest_updates"],
+  "required": ["summary", "title", "deltas", "speakers", "new_lore", "quest_updates"],
   "properties": {
     "summary": {
       "type": "string",
@@ -77,6 +77,19 @@ pub const EXTRACTION_SCHEMA: &str = r#"{
           "op": {"type": "string", "enum": ["set", "add", "sub"]},
           "value_num": {"type": ["integer", "null"], "description": "For numeric fields. With add or sub this is the magnitude of the change, always positive."},
           "value_txt": {"type": ["string", "null"], "description": "For text fields. Only valid with op = set."}
+        }
+      }
+    },
+    "speakers": {
+      "type": "array",
+      "description": "Every speaker who appears in this chapter, including the protagonist. Reporting who spoke is describing, not inventing. Give `gender` where the chapter makes it clear and omit it otherwise.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name"],
+        "properties": {
+          "name": {"type": "string", "description": "The character's name, spelled as the chapter spells it. Never `narrator` or `SYSTEM` -- those are voices, not people."},
+          "gender": {"type": ["string", "null"], "enum": ["male", "female", "neutral", null], "description": "So the engine can cast a matching voice. A voice once assigned is permanent, so omit rather than guess."}
         }
       }
     },
@@ -141,6 +154,10 @@ pub struct Extraction {
     pub summary: String,
     #[serde(default)]
     pub deltas: Vec<ProposedDelta>,
+    /// Who spoke in this chapter. The general source of gender hints; `new_lore` is the
+    /// specific one, for a character the chapter genuinely introduces.
+    #[serde(default)]
+    pub speakers: Vec<ProposedSpeaker>,
     #[serde(default)]
     pub new_lore: Vec<ProposedLore>,
     #[serde(default)]
@@ -187,6 +204,40 @@ impl ProposedDelta {
 
 /// A proposed `lore` row. `always_on` is absent by design — the model does not get to
 /// decide that an entry is injected into every future chapter.
+/// A speaker the chapter contained, with an optional gender hint.
+///
+/// This exists because `new_lore` means "newly *introduced*", and the characters whose voices
+/// matter most — the protagonist, anyone named in the premise — are never new. So the one hint
+/// the engine needs is the one `new_lore` will never carry. Listing who spoke is something the
+/// model can always do from the prose in front of it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProposedSpeaker {
+    pub name: String,
+    /// `male` | `female` | `neutral`. **A hint, never a contract** — optional in the schema and
+    /// here, so a model that omits it degrades to un-gendered casting rather than failing.
+    #[serde(default)]
+    pub gender: Option<String>,
+}
+
+impl ProposedSpeaker {
+    /// The normalised gender hint, if the model supplied a recognisable one.
+    pub fn gender_hint(&self) -> Option<&'static str> {
+        normalise_gender(self.gender.as_deref())
+    }
+}
+
+/// Map a free-text gender onto the three values the engine understands.
+///
+/// Anything unrecognised becomes `None`, so a stray value is ignored rather than mis-casting.
+fn normalise_gender(g: Option<&str>) -> Option<&'static str> {
+    match g?.trim().to_ascii_lowercase().as_str() {
+        "male" => Some("male"),
+        "female" => Some("female"),
+        "neutral" => Some("neutral"),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProposedLore {
     pub name: String,
@@ -210,16 +261,11 @@ pub struct ProposedLore {
 
 impl ProposedLore {
     /// The normalised gender hint, if this is a character and the model supplied one.
-    pub fn gender_hint(&self) -> Option<&str> {
+    pub fn gender_hint(&self) -> Option<&'static str> {
         if !self.kind.eq_ignore_ascii_case("character") {
             return None;
         }
-        match self.gender.as_deref()?.trim().to_ascii_lowercase().as_str() {
-            "male" => Some("male"),
-            "female" => Some("female"),
-            "neutral" => Some("neutral"),
-            _ => None,
-        }
+        normalise_gender(self.gender.as_deref())
     }
 }
 
@@ -280,6 +326,17 @@ pub fn parse_extraction(content: &str) -> Result<Extraction, EmberError> {
             body: content.to_string(),
             detail: "summary was empty; it is the only long-range context the story has"
                 .to_string(),
+        });
+    }
+
+    // The same loophole: `title` is required, but an empty string satisfies a required string.
+    // Left alone, `derive_title`'s `Chapter N` fallback would mask a retry-worthy generation —
+    // that fallback exists for the `state_dirty` case, not to paper over an extraction that
+    // otherwise succeeded.
+    if parsed.title.trim().is_empty() {
+        return Err(EmberError::Malformed {
+            body: content.to_string(),
+            detail: "title was empty; the schema requires one and readers see it".to_string(),
         });
     }
 

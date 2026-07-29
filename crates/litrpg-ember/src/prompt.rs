@@ -376,6 +376,10 @@ pub fn pass2_messages(chapter_text: &str, known_subjects: &[String]) -> Vec<Mess
          Report a delta only for a change the chapter actually states. A field outside \
          this list, or a subject that is not a real character, is rejected by the engine \
          and the change is lost — so do not invent either.\n\n\
+         List every speaker in `speakers`, including the protagonist, with a `gender` where the \
+         chapter makes it clear. This is reporting who spoke, not inventing anything. The engine \
+         casts a voice from it and a voice once assigned is permanent, so omit `gender` rather \
+         than guess. Never list `narrator` or `SYSTEM` — they are voices, not people.\n\n\
          Add a `new_lore` entry for every character who appears here for the first time, with \
          `kind` = character and their `gender` — the engine casts a voice from it, and a voice \
          once assigned is permanent. Omit `gender` rather than guessing.\n\n\

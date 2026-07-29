@@ -130,11 +130,7 @@ impl Store {
     /// Wrapped in a transaction: a partially-attached chapter (`has_audio = 1` with
     /// no segment rows) would make the manifest and the segment table disagree,
     /// and every client derives Range requests from that pair.
-    pub fn attach_audio(
-        &self,
-        number: u32,
-        manifest: &Manifest,
-    ) -> Result<()> {
+    pub fn attach_audio(&self, number: u32, manifest: &Manifest) -> Result<()> {
         // Guard the invariant at the write boundary rather than trusting the caller.
         // Clients derive Range offsets from these segments, so a non-contiguous
         // manifest or a duration that disagrees with the last segment produces

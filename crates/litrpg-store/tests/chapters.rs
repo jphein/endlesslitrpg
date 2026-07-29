@@ -48,9 +48,7 @@ fn missing_chapter_is_an_error_not_a_panic() {
 fn attaching_audio_persists_manifest_segments_and_duration() {
     let store = Store::open_in_memory().unwrap();
     store.insert_chapter(&new_chapter(1)).unwrap();
-    store
-        .attach_audio(1, &manifest(1))
-        .unwrap();
+    store.attach_audio(1, &manifest(1)).unwrap();
 
     let ch = store.chapter(1).unwrap();
     assert!(ch.has_audio);
@@ -67,12 +65,8 @@ fn attaching_audio_persists_manifest_segments_and_duration() {
 fn attaching_audio_twice_replaces_rather_than_duplicates_segments() {
     let store = Store::open_in_memory().unwrap();
     store.insert_chapter(&new_chapter(1)).unwrap();
-    store
-        .attach_audio(1, &manifest(1))
-        .unwrap();
-    store
-        .attach_audio(1, &manifest(1))
-        .unwrap();
+    store.attach_audio(1, &manifest(1)).unwrap();
+    store.attach_audio(1, &manifest(1)).unwrap();
     assert_eq!(store.segments(1).unwrap().len(), 1);
 }
 

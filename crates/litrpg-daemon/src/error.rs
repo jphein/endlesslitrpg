@@ -17,6 +17,11 @@ pub enum ApiError {
     #[error("bad request: {0}")]
     BadRequest(String),
 
+    /// The request is well-formed but the server's state cannot satisfy it — e.g.
+    /// recording playback progress before `litrpg init` has written a story row.
+    #[error("conflict: {0}")]
+    Conflict(String),
+
     /// A route whose backing store method does not exist yet. Distinct from a 500
     /// so it can never be mistaken for a transient failure — see `notes.rs`.
     #[error("not implemented: {0}")]
@@ -35,9 +40,14 @@ impl IntoResponse for ApiError {
             Self::ChapterNotFound(_) | Self::AudioNotFound(_) => StatusCode::NOT_FOUND,
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
+            Self::Conflict(_) => StatusCode::CONFLICT,
             // A missing chapter surfaces from the store as `ChapterNotFound`; map it
             // rather than letting it read as a server fault.
             Self::Store(litrpg_store::StoreError::ChapterNotFound(_)) => StatusCode::NOT_FOUND,
+            // `NoStoryRow` means the deployment was never initialised. The request is
+            // well-formed, so this is a *state* precondition (409), not a 400 and
+            // certainly not the 500 it would otherwise fall through to.
+            Self::Store(litrpg_store::StoreError::NoStoryRow) => StatusCode::CONFLICT,
             Self::Store(_) | Self::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (status, Json(json!({ "error": self.to_string() }))).into_response()

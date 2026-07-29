@@ -6,7 +6,9 @@ use std::sync::Mutex;
 
 use litrpg_core::Manifest;
 use litrpg_ember::prompt::{ChapterSummary, LoreEntry, pass1_messages};
-use litrpg_ember::{EmberError, Extraction, Pass1Input, ProposedDelta, ProposedLore, QuestUpdate};
+use litrpg_ember::{
+    EmberError, Extraction, Pass1Input, ProposedDelta, ProposedLore, ProposedSpeaker, QuestUpdate,
+};
 use litrpg_engine::{Artifacts, EngineError, Generator, Library, Renderer, StoryMeta};
 use litrpg_store::Store;
 use litrpg_tts::{Pcm16k, RenderRequest, TtsError, async_trait};
@@ -421,6 +423,21 @@ pub fn lore_row(name: &str, kind: &str, keywords: &str) -> ProposedLore {
     }
 }
 
+/// An extraction whose `speakers` carry gender hints — the general path, covering characters
+/// the chapter did not newly introduce.
+pub fn extraction_with_speakers(speakers: &[(&str, Option<&str>)]) -> Extraction {
+    Extraction {
+        speakers: speakers
+            .iter()
+            .map(|(name, gender)| ProposedSpeaker {
+                name: name.to_string(),
+                gender: gender.map(str::to_string),
+            })
+            .collect(),
+        ..extraction_with(vec![], vec![])
+    }
+}
+
 /// A lore row carrying a gender hint, for gender-matched casting.
 pub fn gendered_lore(name: &str, gender: &str) -> ProposedLore {
     ProposedLore {
@@ -434,6 +451,7 @@ pub fn extraction_with(deltas: Vec<ProposedDelta>, new_lore: Vec<ProposedLore>) 
         title: "The First Seal".to_string(),
         summary: "Kaelen broke the first seal.".to_string(),
         deltas,
+        speakers: Vec::new(),
         new_lore,
         quest_updates: vec![QuestUpdate {
             name: "The Ashen Ledger".to_string(),

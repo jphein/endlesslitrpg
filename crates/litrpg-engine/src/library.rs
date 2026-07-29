@@ -17,7 +17,7 @@
 //! [`Engine::with_store`](crate::Engine::with_store) guard is alive. The cycle is written so
 //! every guard is released before the next statement; keep it that way.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use litrpg_ember::prompt::{ChapterSummary, LoreEntry};
@@ -29,11 +29,17 @@ use crate::ports::{Library, StoryMeta};
 /// [`Library`] backed by the story database.
 pub struct StoreLibrary {
     store: Arc<Mutex<Store>>,
+    /// Base for `story.prompt_path`, which is stored **relative** (migration 004) so a project
+    /// folder can be moved without leaving the database pointing at where it used to be.
+    story_dir: PathBuf,
 }
 
 impl StoreLibrary {
-    pub fn new(store: Arc<Mutex<Store>>) -> Self {
-        Self { store }
+    pub fn new(store: Arc<Mutex<Store>>, story_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            store,
+            story_dir: story_dir.into(),
+        }
     }
 
     fn with_store<T>(
@@ -52,6 +58,10 @@ impl Library for StoreLibrary {
     /// the path and the hash of what the CLI last saw. Reading the file here means an edit
     /// JP made in `$EDITOR` takes effect at the next chapter boundary with no extra step,
     /// which is exactly the behaviour §9.3 asks for.
+    ///
+    /// `prompt_path` is relative to `story_dir` since migration 004. An absolute value still
+    /// works, because `Path::join` lets it win — so a deployment that deliberately points the
+    /// premise somewhere else is not broken by the change.
     fn story(&self) -> Result<StoryMeta, EngineError> {
         let row = self
             .with_store(|s| s.story())?
@@ -59,8 +69,10 @@ impl Library for StoreLibrary {
                 detail: "no story row; run `litrpg init` first".to_string(),
             })?;
 
-        let path = Path::new(&row.prompt_path);
-        let prompt_md = std::fs::read_to_string(path).map_err(|e| EngineError::Library {
+        // `Path::join` lets an absolute value win, so a hand-set absolute path still resolves.
+        // Forgiving on the way in, relative on the way out.
+        let path = self.story_dir.join(Path::new(&row.prompt_path));
+        let prompt_md = std::fs::read_to_string(&path).map_err(|e| EngineError::Library {
             detail: format!("reading story prompt {}: {e}", path.display()),
         })?;
 
@@ -130,7 +142,7 @@ mod tests {
 
     #[test]
     fn a_missing_story_row_is_a_clear_error_not_a_default() {
-        let lib = StoreLibrary::new(shared());
+        let lib = StoreLibrary::new(shared(), "");
         let err = lib.story().unwrap_err();
         assert!(format!("{err}").contains("litrpg init"), "got {err}");
     }
@@ -144,7 +156,7 @@ mod tests {
             .upsert_lore("Ashen Vale", "place", "vale,ash", "A vale.", 10, true, 1)
             .unwrap();
 
-        let lib = StoreLibrary::new(store);
+        let lib = StoreLibrary::new(store, "");
         let lore = lib.lore().unwrap();
         assert_eq!(lore.len(), 1);
         assert_eq!(lore[0].name, "Ashen Vale");
@@ -156,7 +168,7 @@ mod tests {
     #[test]
     fn summaries_come_back_oldest_first_and_are_idempotent_by_chapter() {
         let store = shared();
-        let lib = StoreLibrary::new(store);
+        let lib = StoreLibrary::new(store, "");
 
         lib.put_summary(1, "first").unwrap();
         lib.put_summary(2, "second").unwrap();
@@ -180,7 +192,7 @@ mod tests {
     #[test]
     fn the_window_keeps_the_most_recent_summaries() {
         let store = shared();
-        let lib = StoreLibrary::new(store);
+        let lib = StoreLibrary::new(store, "");
         for c in 1..=8 {
             lib.put_summary(c, &format!("ch{c}")).unwrap();
         }
@@ -210,8 +222,125 @@ mod tests {
             })
             .unwrap();
 
-        let err = StoreLibrary::new(store).story().unwrap_err();
+        let err = StoreLibrary::new(store, "").story().unwrap_err();
         assert!(format!("{err}").contains("empty"), "got {err}");
+    }
+
+    /// Migration 004 made `prompt_path` relative to `story_dir`, so a project folder can move
+    /// without leaving the database pointing at where it used to be — which is exactly the bug
+    /// that made `litrpg play 1` fail on the live story.
+    #[test]
+    fn a_relative_prompt_path_resolves_against_story_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("prompt.md"), "Relative premise.").unwrap();
+
+        let store = shared();
+        store
+            .lock()
+            .unwrap()
+            .insert_story_if_absent(&litrpg_store::NewStory {
+                title: "T".into(),
+                protagonist: "K".into(),
+                // Just the basename, as migration 004 stores it.
+                prompt_path: "prompt.md".into(),
+                prompt_hash: litrpg_core::content_hash("Relative premise."),
+                target_words: 500,
+            })
+            .unwrap();
+
+        let lib = StoreLibrary::new(store, dir.path());
+        assert_eq!(lib.story().unwrap().prompt_md, "Relative premise.");
+    }
+
+    #[test]
+    fn the_same_relative_path_follows_a_moved_story_dir() {
+        // The point of the migration: the row does not change, only the base does.
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        std::fs::write(a.path().join("prompt.md"), "In A.").unwrap();
+        std::fs::write(b.path().join("prompt.md"), "In B.").unwrap();
+
+        let store = shared();
+        store
+            .lock()
+            .unwrap()
+            .insert_story_if_absent(&litrpg_store::NewStory {
+                title: "T".into(),
+                protagonist: "K".into(),
+                prompt_path: "prompt.md".into(),
+                prompt_hash: litrpg_core::content_hash("In A."),
+                target_words: 500,
+            })
+            .unwrap();
+
+        assert_eq!(
+            StoreLibrary::new(Arc::clone(&store), a.path())
+                .story()
+                .unwrap()
+                .prompt_md,
+            "In A."
+        );
+        assert_eq!(
+            StoreLibrary::new(store, b.path())
+                .story()
+                .unwrap()
+                .prompt_md,
+            "In B.",
+            "the identical row must resolve against whichever story_dir is configured"
+        );
+    }
+
+    /// Forgiving on the way in: an operator who deliberately points the premise outside the
+    /// project keeps working, because `Path::join` lets an absolute value win.
+    #[test]
+    fn an_absolute_prompt_path_still_resolves() {
+        let dir = tempfile::tempdir().unwrap();
+        let prompt = dir.path().join("elsewhere.md");
+        std::fs::write(&prompt, "Absolute premise.").unwrap();
+
+        let store = shared();
+        store
+            .lock()
+            .unwrap()
+            .insert_story_if_absent(&litrpg_store::NewStory {
+                title: "T".into(),
+                protagonist: "K".into(),
+                prompt_path: prompt.to_string_lossy().to_string(),
+                prompt_hash: litrpg_core::content_hash("Absolute premise."),
+                target_words: 500,
+            })
+            .unwrap();
+
+        // A completely unrelated story_dir, to prove the absolute path is what is used.
+        let other = tempfile::tempdir().unwrap();
+        let lib = StoreLibrary::new(store, other.path());
+        assert_eq!(lib.story().unwrap().prompt_md, "Absolute premise.");
+    }
+
+    #[test]
+    fn a_missing_prompt_file_names_the_resolved_path_not_the_stored_one() {
+        // The error has to show where we actually looked, or a relative row plus the wrong
+        // story_dir is undiagnosable.
+        let dir = tempfile::tempdir().unwrap();
+        let store = shared();
+        store
+            .lock()
+            .unwrap()
+            .insert_story_if_absent(&litrpg_store::NewStory {
+                title: "T".into(),
+                protagonist: "K".into(),
+                prompt_path: "prompt.md".into(),
+                prompt_hash: "x".into(),
+                target_words: 500,
+            })
+            .unwrap();
+
+        let err = StoreLibrary::new(store, dir.path()).story().unwrap_err();
+        let shown = format!("{err}");
+        assert!(
+            shown.contains(&dir.path().display().to_string()),
+            "the error must name the resolved path: {shown}"
+        );
     }
 
     #[test]
@@ -233,7 +362,7 @@ mod tests {
             })
             .unwrap();
 
-        let lib = StoreLibrary::new(store);
+        let lib = StoreLibrary::new(store, "");
         assert_eq!(lib.story().unwrap().prompt_md, "Original premise.");
 
         std::fs::write(&prompt, "Edited premise.").unwrap();

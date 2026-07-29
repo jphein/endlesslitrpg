@@ -4,8 +4,8 @@ mod common;
 
 use axum::http::StatusCode;
 use common::{
-    CH1_DURATION_MS, assert_status, body_json, body_string, fixture, fixture_with_ledger,
-    fixture_with_protagonist, fixture_with_story_row, header,
+    CH1_DURATION_MS, assert_status, body_json, body_string, fixture, fixture_progress,
+    fixture_with_ledger, fixture_with_protagonist, fixture_with_story_row, header,
 };
 
 #[tokio::test]
@@ -228,6 +228,157 @@ async fn state_nests_subject_and_field() {
     assert_eq!(kael["hp"], 41);
     assert_eq!(kael["location"], "The Sunken Vale");
     assert_eq!(v["anomalies"], serde_json::json!([]));
+}
+
+/// Render health surfaces on `/api/state`, because the daemon is the only long-lived
+/// HTTP surface — a short-lived `litrpg status` cannot see a running engine either.
+#[tokio::test]
+async fn state_reports_render_health() {
+    // Chapter 1 has audio, chapter 2 does not and is dirty.
+    let f = fixture();
+    let v = body_json(f.get("/api/state").await).await;
+
+    assert_eq!(v["missing_audio"], serde_json::json!([2]));
+    assert_eq!(v["dirty_chapters"], serde_json::json!([2]));
+}
+
+/// A `sherpa:` cast row on a daemon whose registry has no sherpa backend must be marked
+/// unrenderable **and** explained — otherwise comparing the cast against a manifest that
+/// says "azure" reads as a bug rather than as the deliberate render-time substitution it is.
+#[tokio::test]
+async fn cast_marks_rows_unrenderable_by_current_backends() {
+    let f = fixture_with_ledger(); // registry is empty; cast row names sherpa
+    let v = body_json(f.get("/api/state").await).await;
+
+    let cast = v["cast"].as_array().expect("cast array");
+    let kael = cast
+        .iter()
+        .find(|c| c["speaker"] == "Kael")
+        .expect("Kael cast row");
+
+    assert_eq!(kael["voice_ref"], "sherpa:kokoro-multi-lang-v1_0:18");
+    assert_eq!(kael["backend"], "sherpa");
+    assert_eq!(kael["renderable_here"], false);
+    assert_eq!(kael["backend_available"], false);
+
+    let reason = kael["reason"].as_str().expect("a reason must be given");
+    assert!(
+        reason.contains("sherpa") && reason.contains("substituted"),
+        "the reason must name the backend and explain the substitution: {reason}"
+    );
+}
+
+/// The basis for the judgement must be published, since `renderable_here` is scoped to
+/// this process and a client otherwise cannot tell a deployment problem from a build one.
+#[tokio::test]
+async fn cast_publishes_the_backends_it_was_judged_against() {
+    let f = fixture_with_ledger();
+    let v = body_json(f.get("/api/state").await).await;
+
+    assert!(
+        v["cast_judged_against_backends"].is_array(),
+        "the backend basis must always be present"
+    );
+    // Empty registry in this fixture, so nothing is renderable — and the empty list says
+    // exactly why, rather than leaving `renderable_here: false` unexplained.
+    assert_eq!(
+        v["cast_judged_against_backends"],
+        serde_json::json!([]),
+        "an empty basis must be reported as empty, not omitted"
+    );
+}
+
+/// With the voice's backend registered and ready, the row is renderable and carries no
+/// reason — absence of a reason is meaningful, so it must not be filled with noise.
+#[tokio::test]
+async fn cast_row_is_clean_when_its_backend_is_registered() {
+    use litrpg_tts::TtsRegistry;
+    use litrpg_tts::backend::Availability;
+
+    let f = common::fixture_ledger_with_registry(TtsRegistry::new().with(Box::new(
+        common::StubBackend::new("sherpa", Availability::Ready, vec![]),
+    )));
+    let v = body_json(f.get("/api/state").await).await;
+
+    let kael = v["cast"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["speaker"] == "Kael")
+        .expect("Kael cast row");
+
+    assert_eq!(kael["renderable_here"], true);
+    assert_eq!(kael["backend_available"], true);
+    assert!(
+        kael["reason"].is_null(),
+        "a healthy row must carry no reason"
+    );
+    assert_eq!(
+        v["cast_judged_against_backends"],
+        serde_json::json!(["sherpa"])
+    );
+}
+
+/// Registered-but-unavailable is the gap between the two booleans: the engine would not
+/// substitute (registration passed) yet a render would still fail.
+#[tokio::test]
+async fn registered_but_unconfigured_backend_is_distinguished() {
+    use litrpg_tts::TtsRegistry;
+    use litrpg_tts::backend::Availability;
+
+    let f = common::fixture_ledger_with_registry(TtsRegistry::new().with(Box::new(
+        common::StubBackend::new(
+            "sherpa",
+            Availability::missing("no model files under /nonexistent"),
+            vec![],
+        ),
+    )));
+    let v = body_json(f.get("/api/state").await).await;
+
+    let kael = v["cast"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["speaker"] == "Kael")
+        .unwrap();
+
+    assert_eq!(
+        kael["renderable_here"], true,
+        "registration succeeded, so the engine would not substitute"
+    );
+    assert_eq!(
+        kael["backend_available"], false,
+        "but a render would still fail"
+    );
+    let reason = kael["reason"].as_str().expect("reason");
+    assert!(
+        reason.contains("/nonexistent"),
+        "the reason must name the offending path: {reason}"
+    );
+}
+
+/// The daemon must not imply it can distinguish "will retry" from "abandoned": retry
+/// counters live in the engine's memory, in a different process.
+#[tokio::test]
+async fn state_admits_retry_counts_are_invisible() {
+    let f = fixture();
+    let v = body_json(f.get("/api/state").await).await;
+
+    assert_eq!(
+        v["retry_counts_visible"], false,
+        "the daemon cannot read the engine's in-memory retry counters"
+    );
+}
+
+/// A fully-rendered story reports empty lists rather than omitting the fields — a status
+/// pane should not have to distinguish "absent" from "none".
+#[tokio::test]
+async fn state_render_health_is_empty_when_all_audio_present() {
+    let f = fixture_progress(3, 3);
+    let v = body_json(f.get("/api/state").await).await;
+
+    assert_eq!(v["missing_audio"], serde_json::json!([]));
+    assert_eq!(v["dirty_chapters"], serde_json::json!([]));
 }
 
 #[tokio::test]

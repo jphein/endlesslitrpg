@@ -80,6 +80,10 @@ pub struct Config {
     /// Root holding `NNNN.pcm` / `NNNN.mp3`, 4-digit zero-padded. From
     /// `litrpg_config::Config::media_dir`.
     pub media_root: PathBuf,
+    /// Rendered-ahead chapters the engine aims to keep (spec §6.0). Served on
+    /// `/api/progress` so a client can judge buffer health against the same number the
+    /// engine works to, rather than hardcoding its own idea of "enough".
+    pub buffer_target: u32,
     pub story: StoryConfig,
 }
 
@@ -104,10 +108,12 @@ impl Config {
     /// Direct construction, for tests and explicit wiring. Defaults `db_path` to the
     /// shared crate's default so it is never silently empty.
     pub fn new(bind: SocketAddr, media_root: impl Into<PathBuf>) -> Self {
+        let shared = litrpg_config::Config::default();
         Self {
             bind,
-            db_path: litrpg_config::Config::default().db_path,
+            db_path: shared.db_path,
             media_root: media_root.into(),
+            buffer_target: shared.buffer_target,
             story: StoryConfig::default(),
         }
     }
@@ -131,6 +137,7 @@ impl Config {
             bind,
             db_path: expand_tilde(&shared.db_path),
             media_root: expand_tilde(&shared.media_dir),
+            buffer_target: shared.buffer_target,
             story: StoryConfig {
                 base_url: format!("http://{bind}"),
                 ..StoryConfig::default()

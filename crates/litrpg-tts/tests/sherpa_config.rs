@@ -410,3 +410,30 @@ fn a_missing_model_root_is_reported_as_unavailable_with_the_path() {
         "the reason must name the path so it is fixable: {reason}"
     );
 }
+
+// ------------------------------------ normalization granularity (per-sentence manifests)
+
+#[test]
+fn every_speaker_kind_still_asks_for_normalization_by_default() {
+    // The default is unchanged: a render call normalizes. What changed is that a caller
+    // rendering sentence-by-sentence can now opt out and normalize per turn instead.
+    for k in [
+        SpeakerKind::Narrator,
+        SpeakerKind::Character,
+        SpeakerKind::System,
+    ] {
+        assert!(PostProcess::for_kind(k).loudnorm, "{k:?}");
+    }
+}
+
+#[test]
+fn without_loudnorm_keeps_the_system_colouring() {
+    // Opting out of normalization must not silently drop the SYSTEM robot voice —
+    // they are independent stages and conflating them is how the 3.3 LU defect began.
+    let pp = PostProcess::for_kind(SpeakerKind::System).without_loudnorm();
+    assert!(pp.system_fx, "SYSTEM colouring must survive");
+    assert!(!pp.loudnorm);
+    let chain = pp.filter_chain(24_000);
+    assert!(chain.contains("tremolo"), "{chain}");
+    assert!(!chain.contains("loudnorm"), "{chain}");
+}

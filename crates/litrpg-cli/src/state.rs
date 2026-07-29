@@ -39,6 +39,13 @@ pub struct StateReport {
     pub subjects: Vec<SubjectView>,
     /// From `StateSnapshot::anomalies` — malformed-but-applied ledger rows.
     pub anomalies: Vec<String>,
+    /// Subject pairs that may be one character recorded under two names.
+    ///
+    /// Reported in `state` rather than `cast` on purpose: `cast` maps speakers to
+    /// voices, while this is about ledger *subjects*, and `state` is the view where the
+    /// symptom actually shows — a character sheet that is half empty because the other
+    /// half is filed under a second name.
+    pub possible_aliases: Vec<(String, String)>,
 }
 
 fn value_to_string(v: &Value) -> String {
@@ -92,9 +99,20 @@ pub fn state(store: &Store, subject: Option<&str>) -> Result<StateReport> {
         }
     }
 
+    // Computed over every subject in the snapshot, not just the filtered view: asking
+    // for one character should still surface that their stats are split.
+    let all_subjects: Vec<String> = snap
+        .values
+        .keys()
+        .map(|(s, _)| s.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+
     Ok(StateReport {
         subjects: by_subject.into_values().collect(),
         anomalies: snap.anomalies.clone(),
+        possible_aliases: crate::naming::possible_aliases(&all_subjects),
     })
 }
 
@@ -102,6 +120,7 @@ pub fn state(store: &Store, subject: Option<&str>) -> Result<StateReport> {
 pub fn render_all(r: &StateReport) -> String {
     let mut out = String::new();
     render_anomalies(&mut out, r);
+    render_aliases(&mut out, r);
     if r.subjects.is_empty() {
         out.push_str("No state recorded yet.\n");
     }
@@ -133,6 +152,7 @@ pub fn render_all(r: &StateReport) -> String {
 pub fn render_subject(r: &StateReport, subject: &str) -> String {
     let mut out = String::new();
     render_anomalies(&mut out, r);
+    render_aliases(&mut out, r);
     let Some(s) = r.subjects.iter().find(|s| s.subject == subject) else {
         out.push_str(&format!("No state recorded for {subject:?}.\n"));
         return out;
@@ -193,6 +213,25 @@ pub fn render_subject(r: &StateReport, subject: &str) -> String {
 /// channel, so it is the only place an operator learns their database contains a
 /// row nothing can read. Printed after the character sheet it would be scrolled
 /// past; the whole point is that it is not normal and should stop you.
+/// Split-identity notice. After the anomaly banner but before the state, because it
+/// changes how every number below should be read.
+fn render_aliases(out: &mut String, r: &StateReport) {
+    if r.possible_aliases.is_empty() {
+        return;
+    }
+    out.push_str(
+        "!! These subjects may be one character recorded under two names, in which case\n\
+         !! the stats below are split between them and neither sheet is complete:\n",
+    );
+    for (short, long) in &r.possible_aliases {
+        out.push_str(&format!("!!   {short:?} and {long:?}\n"));
+    }
+    out.push_str(
+        "!! The ledger is append-only, so this cannot be merged retrospectively. Going\n\
+         !! forward, name the character the same way in prompt.md and story.protagonist.\n\n",
+    );
+}
+
 fn render_anomalies(out: &mut String, r: &StateReport) {
     if r.anomalies.is_empty() {
         return;

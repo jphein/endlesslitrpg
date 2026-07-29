@@ -939,6 +939,7 @@ fn report_with_anomaly() -> state::StateReport {
     state::StateReport {
         subjects: state::state(&with_kaelen(), None).unwrap().subjects,
         anomalies: vec!["seq 12 Kaelen.gold: undecodable op \"increment\"".to_string()],
+        possible_aliases: Vec::new(),
     }
 }
 
@@ -1296,4 +1297,146 @@ fn substitution_is_exposed_in_json() {
         "{json}"
     );
     assert!(json.contains("\"scanned\":[1]"), "{json}");
+}
+
+// ------------------------------------------------- split-identity notice
+
+#[test]
+fn state_flags_a_character_recorded_under_two_names() {
+    // The live collision: `Kaelen` and `Kaelen Vord` both accrued stats, so neither
+    // character sheet is complete and the ledger cannot be merged retrospectively.
+    let s = store();
+    s.upsert_cast("Kaelen", "sherpa:x:0", "character", 1)
+        .unwrap();
+    s.upsert_cast("Kaelen Vord", "sherpa:y:0", "character", 1)
+        .unwrap();
+    s.append_delta(1, &num("Kaelen", "hp", Op::Set, 80))
+        .unwrap()
+        .unwrap();
+    s.append_delta(1, &num("Kaelen Vord", "gold", Op::Set, 12))
+        .unwrap()
+        .unwrap();
+
+    let r = state::state(&s, None).unwrap();
+    assert_eq!(
+        r.possible_aliases,
+        vec![("Kaelen".to_string(), "Kaelen Vord".to_string())]
+    );
+
+    let out = state::render_all(&r);
+    assert!(
+        out.contains("one character recorded under two names"),
+        "{out}"
+    );
+    assert!(
+        out.contains("append-only"),
+        "must say it cannot be merged:\n{out}"
+    );
+    assert!(
+        out.contains("prompt.md"),
+        "must say how to stop it recurring:\n{out}"
+    );
+}
+
+#[test]
+fn the_split_identity_notice_shows_even_when_filtered_to_one_subject() {
+    // Asking for one character must still reveal that their stats are split — that view
+    // is exactly where a half-empty sheet is noticed.
+    let s = store();
+    s.upsert_cast("Kaelen", "sherpa:x:0", "character", 1)
+        .unwrap();
+    s.upsert_cast("Kaelen Vord", "sherpa:y:0", "character", 1)
+        .unwrap();
+    s.append_delta(1, &num("Kaelen", "hp", Op::Set, 80))
+        .unwrap()
+        .unwrap();
+    s.append_delta(1, &num("Kaelen Vord", "gold", Op::Set, 12))
+        .unwrap()
+        .unwrap();
+
+    let r = state::state(&s, Some("Kaelen")).unwrap();
+    assert_eq!(r.subjects.len(), 1);
+    assert!(!r.possible_aliases.is_empty(), "must not be filtered away");
+    assert!(state::render_subject(&r, "Kaelen").contains("two names"));
+}
+
+#[test]
+fn distinct_characters_produce_no_split_identity_notice() {
+    let s = with_kaelen();
+    s.upsert_cast("Vessa", "sherpa:y:0", "character", 1)
+        .unwrap();
+    s.append_delta(1, &num("Kaelen", "hp", Op::Set, 80))
+        .unwrap()
+        .unwrap();
+    s.append_delta(1, &num("Vessa", "hp", Op::Set, 40))
+        .unwrap()
+        .unwrap();
+    let r = state::state(&s, None).unwrap();
+    assert!(r.possible_aliases.is_empty(), "{:?}", r.possible_aliases);
+    assert!(!state::render_all(&r).contains("two names"));
+}
+
+#[test]
+fn the_split_identity_notice_is_in_the_json() {
+    let s = store();
+    s.upsert_cast("Kaelen", "sherpa:x:0", "character", 1)
+        .unwrap();
+    s.upsert_cast("Kaelen Vord", "sherpa:y:0", "character", 1)
+        .unwrap();
+    s.append_delta(1, &num("Kaelen", "hp", Op::Set, 80))
+        .unwrap()
+        .unwrap();
+    s.append_delta(1, &num("Kaelen Vord", "gold", Op::Set, 12))
+        .unwrap()
+        .unwrap();
+    let json = serde_json::to_string(&state::state(&s, None).unwrap()).unwrap();
+    assert!(json.contains("possible_aliases"), "{json}");
+    assert!(json.contains("Kaelen Vord"), "{json}");
+}
+
+#[test]
+fn status_rechecks_the_protagonist_against_an_edited_prompt() {
+    // The mismatch can be introduced long after init by editing prompt.md, and status
+    // is where a pending prompt edit already surfaces.
+    let dir = tmp();
+    let path = dir.path().join("prompt.md");
+    std::fs::write(&path, "# The Vale\n\nKaelen Vord returns.\n").unwrap();
+
+    let s = store();
+    s.upsert_story(&litrpg_store::NewStory {
+        title: "T".into(),
+        protagonist: "Kaelen".into(),
+        prompt_path: "prompt.md".into(),
+        prompt_hash: content_hash("# The Vale\n\nKaelen Vord returns.\n"),
+        target_words: 2000,
+    })
+    .unwrap();
+
+    let r = status::status(&s, 3, dir.path()).unwrap();
+    assert!(
+        r.protagonist_check.is_warning(),
+        "{:?}",
+        r.protagonist_check
+    );
+    let out = status::render_text(&r);
+    assert!(out.contains("Kaelen Vord"), "{out}");
+}
+
+#[test]
+fn status_is_quiet_when_the_prompt_names_the_protagonist() {
+    let dir = tmp();
+    let path = dir.path().join("prompt.md");
+    std::fs::write(&path, "# The Vale\n\nKaelen returns.\n").unwrap();
+    let s = store();
+    s.upsert_story(&litrpg_store::NewStory {
+        title: "T".into(),
+        protagonist: "Kaelen".into(),
+        prompt_path: "prompt.md".into(),
+        prompt_hash: content_hash("# The Vale\n\nKaelen returns.\n"),
+        target_words: 2000,
+    })
+    .unwrap();
+    let r = status::status(&s, 3, dir.path()).unwrap();
+    assert!(!r.protagonist_check.is_warning());
+    assert!(!status::render_text(&r).contains("stat changes"));
 }

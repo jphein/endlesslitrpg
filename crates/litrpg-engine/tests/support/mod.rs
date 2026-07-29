@@ -241,6 +241,8 @@ pub struct FakeLibrary {
     pub lore: Mutex<Vec<LoreEntry>>,
     pub summaries: Mutex<Vec<ChapterSummary>>,
     pub puts: Mutex<Vec<(u32, String)>>,
+    /// Every prompt hash stamped as "in effect", in order.
+    pub stamped: Mutex<Vec<String>>,
 }
 
 impl FakeLibrary {
@@ -256,6 +258,7 @@ impl FakeLibrary {
             lore: Mutex::new(Vec::new()),
             summaries: Mutex::new(Vec::new()),
             puts: Mutex::new(Vec::new()),
+            stamped: Mutex::new(Vec::new()),
         }
     }
 
@@ -271,6 +274,11 @@ impl FakeLibrary {
 
     pub fn summaries_written(&self) -> Vec<(u32, String)> {
         self.puts.lock().unwrap().clone()
+    }
+
+    /// Prompt hashes stamped as in effect.
+    pub fn hashes_stamped(&self) -> Vec<String> {
+        self.stamped.lock().unwrap().clone()
     }
 }
 

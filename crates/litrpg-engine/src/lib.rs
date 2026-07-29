@@ -37,6 +37,7 @@
 //!   pass-1 failure abandons the cycle, and it does so before anything is written.
 
 pub mod adapters;
+pub mod canon;
 pub mod cast;
 pub mod cycle;
 pub mod error;
@@ -47,6 +48,7 @@ pub mod render;
 pub mod voices;
 
 pub use adapters::{EmberGenerator, RegistryRenderer};
+pub use canon::{SubjectResolution, resolve_subject};
 pub use cast::{
     CastAssignment, NARRATOR_FALLBACK_VOICE, ParsedSpeaker, SYSTEM_VOICE, VoiceAssigner,
     character_pool, kokoro_voice_ref,

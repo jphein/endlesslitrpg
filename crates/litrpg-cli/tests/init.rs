@@ -749,3 +749,143 @@ fn the_relative_default_layout_creates_data_media_and_story() {
         assert!(names.contains(&expected.to_string()), "{names:?}");
     }
 }
+
+// -------------------------------------------------- protagonist vs prompt
+
+fn write_prompt(config: &litrpg_config::Config, body: &str) {
+    std::fs::create_dir_all(&config.story_dir).unwrap();
+    std::fs::write(config.prompt_path(), body).unwrap();
+}
+
+#[test]
+fn init_warns_when_the_prompt_uses_a_longer_name() {
+    // The live incident: --protagonist "Kaelen" against a prompt saying "Kaelen Vord".
+    let dir = tmp();
+    let cfg = write_config(dir.path());
+    // Seed the prompt first so init does not overwrite it with the template.
+    let probe = litrpg_config::Config::load_from(&cfg).unwrap();
+    write_prompt(&probe, "# The Ashen Vale\n\nKaelen Vord returns.\n");
+
+    let (_, r) = init::init(
+        Some(&cfg),
+        &InitOptions {
+            protagonist: Some("Kaelen".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    assert!(r.protagonist_check.is_warning());
+    let out = init::render_text(&r);
+    assert!(out.contains("Kaelen Vord"), "{out}");
+    assert!(out.contains("split"), "{out}");
+    assert!(
+        !out.contains("--force --protagonist"),
+        "must not recommend a command that rewrites prompt.md:\n{out}"
+    );
+}
+
+#[test]
+fn init_is_quiet_when_the_prompt_names_the_protagonist() {
+    let dir = tmp();
+    let cfg = write_config(dir.path());
+    let probe = litrpg_config::Config::load_from(&cfg).unwrap();
+    write_prompt(&probe, "# The Ashen Vale\n\nKaelen returns to the vale.\n");
+
+    let (_, r) = init::init(
+        Some(&cfg),
+        &InitOptions {
+            protagonist: Some("Kaelen".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(!r.protagonist_check.is_warning());
+    let out = init::render_text(&r);
+    assert!(!out.contains("split"), "{out}");
+}
+
+#[test]
+fn init_warns_but_still_succeeds_when_the_premise_leaves_them_unnamed() {
+    // A prompt describing "a collector" and letting the model name him is valid setup,
+    // so this must warn rather than refuse.
+    let dir = tmp();
+    let cfg = write_config(dir.path());
+    let probe = litrpg_config::Config::load_from(&cfg).unwrap();
+    write_prompt(&probe, "# A premise\n\nA collector walks out of the ash.\n");
+
+    let (config, r) = init::init(
+        Some(&cfg),
+        &InitOptions {
+            protagonist: Some("Kaelen".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(r.protagonist_check.is_warning());
+    // Setup still completed.
+    assert!(config.db_path.is_file());
+    assert_eq!(r.protagonist, "Kaelen");
+    let store = Store::open(&config.db_path).unwrap();
+    assert_eq!(store.story().unwrap().unwrap().protagonist, "Kaelen");
+}
+
+#[test]
+fn a_placeholder_prompt_naturally_warns_since_it_names_nobody() {
+    // First run with no protagonist given: nothing recorded, so nothing to check.
+    let dir = tmp();
+    let cfg = write_config(dir.path());
+    let (_, r) = init::init(Some(&cfg), &opts()).unwrap();
+    assert_eq!(r.protagonist, "");
+    assert!(
+        !r.protagonist_check.is_warning(),
+        "an unset protagonist is not a mismatch: {:?}",
+        r.protagonist_check
+    );
+}
+
+#[test]
+fn the_check_is_in_the_json_report() {
+    let dir = tmp();
+    let cfg = write_config(dir.path());
+    let probe = litrpg_config::Config::load_from(&cfg).unwrap();
+    write_prompt(&probe, "# The Ashen Vale\n\nKaelen Vord returns.\n");
+    let (_, r) = init::init(
+        Some(&cfg),
+        &InitOptions {
+            protagonist: Some("Kaelen".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let json = serde_json::to_string(&r).unwrap();
+    assert!(json.contains("protagonist_check"), "{json}");
+    assert!(json.contains("named_within_longer_name"), "{json}");
+    assert!(json.contains("Kaelen Vord"), "{json}");
+}
+
+#[test]
+fn force_rechecks_against_the_rewritten_prompt() {
+    // --force replaces prompt.md with the template, which names nobody — so a
+    // previously-fine protagonist becomes a mismatch, and saying so is correct.
+    let dir = tmp();
+    let cfg = write_config(dir.path());
+    let probe = litrpg_config::Config::load_from(&cfg).unwrap();
+    write_prompt(&probe, "# The Ashen Vale\n\nKaelen returns.\n");
+    let (_, first) = init::init(
+        Some(&cfg),
+        &InitOptions {
+            protagonist: Some("Kaelen".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(!first.protagonist_check.is_warning());
+
+    let (_, forced) = init::init(Some(&cfg), &forced()).unwrap();
+    assert!(
+        forced.protagonist_check.is_warning(),
+        "the template names nobody: {:?}",
+        forced.protagonist_check
+    );
+}

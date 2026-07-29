@@ -124,6 +124,33 @@ impl Library for StoreLibrary {
             .collect())
     }
 
+    /// # A read-modify-write, made atomic
+    ///
+    /// `litrpg-store` has single-field setters for the arc outline and the playback cursor but not
+    /// for the prompt hash, so this reads the row and writes it back through `upsert_story`. Both
+    /// happen inside **one** `with_store` closure, therefore under one lock — otherwise a
+    /// concurrent `litrpg init --force --protagonist X` could be reverted by this write, which is
+    /// exactly the hazard single-field setters exist to remove.
+    ///
+    /// A `set_prompt_hash(&str)` in the store would collapse this to one statement and is the
+    /// shape the other two setters already establish.
+    fn set_prompt_hash(&self, hash: &str) -> Result<(), EngineError> {
+        self.with_store(|s| {
+            let Some(row) = s.story()? else {
+                // No story row means nothing to stamp. Not an error: `consumed_through()` takes
+                // the same view, and the caller is mid-cycle rather than mid-setup.
+                return Ok(());
+            };
+            s.upsert_story(&litrpg_store::NewStory {
+                title: row.title,
+                protagonist: row.protagonist,
+                prompt_path: row.prompt_path,
+                prompt_hash: hash.to_string(),
+                target_words: row.target_words,
+            })
+        })
+    }
+
     fn put_summary(&self, chapter: u32, body_md: &str) -> Result<(), EngineError> {
         // Idempotent by chapter in the store (unique index on level/from_ch/to_ch), so
         // re-extracting a `state_dirty` chapter replaces its summary rather than adding a

@@ -209,10 +209,20 @@ async fn a_consumed_chapter_frees_buffer_space() {
 
 /// A story row has to exist before the cursor can be set.
 fn seed_story(e: &FakeEngine) {
+    seed_story_with_protagonist(e, "Kaelen");
+}
+
+/// Seed the store's story row.
+///
+/// The protagonist must match the one the [`Library`] reports: in production both come from the
+/// same row, since `StoreLibrary` reads it — but a fake can let them diverge, and then the engine
+/// resolves a name the gate has never heard of. Keeping them equal here is what makes the fake
+/// faithful rather than convenient.
+fn seed_story_with_protagonist(e: &FakeEngine, protagonist: &str) {
     e.with_store(|s| {
         s.insert_story_if_absent(&litrpg_store::NewStory {
             title: "The Ashen Ledger".into(),
-            protagonist: "Kaelen".into(),
+            protagonist: protagonist.into(),
             prompt_path: "/dev/null".into(),
             prompt_hash: litrpg_core::content_hash("x"),
             target_words: 600,
@@ -783,6 +793,199 @@ async fn an_established_character_is_never_re_voiced_by_a_late_hint() {
         e2.cast_pairs(),
         before,
         "an established cast member must keep their voice"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Subject canonicalisation (issue #11). One character must not become two
+// ledger keys, and two characters must never become one.
+// ---------------------------------------------------------------------------
+
+/// The library the incident actually had: a protagonist named more fully than the CLI knew.
+fn library_with_protagonist(name: &str) -> FakeLibrary {
+    let mut l = FakeLibrary::new();
+    l.story.protagonist = name.to_string();
+    l
+}
+
+#[tokio::test]
+async fn a_short_subject_name_lands_on_the_protagonist_not_a_second_key() {
+    // Reproduces #11: prose calls him "Kaelen", `story.protagonist` is "Kaelen Vord". Before this,
+    // both got ledger rows and `/api/state` showed one character twice with his stats split.
+    let extraction = extraction_with(
+        vec![
+            delta("Kaelen", "xp", "add", Some(150)),
+            delta("Kaelen Vord", "gold", "add", Some(12)),
+        ],
+        vec![],
+    );
+    let e = engine(
+        FakeGenerator::new().with_extraction(extraction),
+        FakeRenderer::new(),
+        library_with_protagonist("Kaelen Vord"),
+        FakeArtifacts::new(),
+    );
+    seed_story_with_protagonist(&e, "Kaelen Vord");
+
+    match e.run_cycle(BufferCursor::At(0)).await.unwrap() {
+        CycleOutcome::Produced {
+            applied, rejected, ..
+        } => {
+            assert_eq!(applied, 2, "both deltas are legitimate");
+            assert_eq!(rejected, 0);
+        }
+        other => panic!("expected Produced, got {other:?}"),
+    }
+
+    // One key, both values.
+    assert_eq!(e.snapshot_num("Kaelen Vord", "xp"), Some(150));
+    assert_eq!(e.snapshot_num("Kaelen Vord", "gold"), Some(12));
+    assert_eq!(
+        e.snapshot_num("Kaelen", "xp"),
+        None,
+        "the short form must not exist as a second subject"
+    );
+
+    let subjects: Vec<String> = e
+        .with_store(|s| s.snapshot())
+        .unwrap()
+        .subjects()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        subjects,
+        vec!["Kaelen Vord".to_string()],
+        "exactly one key for one character: {subjects:?}"
+    );
+}
+
+#[tokio::test]
+async fn new_lore_for_a_character_is_canonicalised_too() {
+    // `new_lore` is the other route to a second known subject, so it needs the same treatment —
+    // otherwise the next chapter's deltas anchor onto the duplicate.
+    let extraction = extraction_with(
+        vec![delta("Kaelen", "level", "set", Some(3))],
+        vec![lore_row("Kaelen", "character", "kaelen")],
+    );
+    let e = engine(
+        FakeGenerator::new().with_extraction(extraction),
+        FakeRenderer::new(),
+        library_with_protagonist("Kaelen Vord"),
+        FakeArtifacts::new(),
+    );
+    seed_story_with_protagonist(&e, "Kaelen Vord");
+    e.run_cycle(BufferCursor::At(0)).await.unwrap();
+
+    assert_eq!(e.snapshot_num("Kaelen Vord", "level"), Some(3));
+
+    let lore_names: Vec<String> = e
+        .with_store(|s| s.lore())
+        .unwrap()
+        .into_iter()
+        .map(|l| l.name)
+        .collect();
+    assert!(
+        lore_names.contains(&"Kaelen Vord".to_string()),
+        "the lore row must carry the canonical name: {lore_names:?}"
+    );
+    assert!(
+        !lore_names.contains(&"Kaelen".to_string()),
+        "the short form must not have been written as a second lore row: {lore_names:?}"
+    );
+
+    // Documented remaining gap: the prose tag `[Kaelen]` still writes a *cast* row under the short
+    // form, so it stays in `known_subjects`. That does not split the ledger — no delta is recorded
+    // against it — but it is a second identity for one person, and closing it needs the cast's
+    // display name separated from its identity key.
+    assert!(
+        e.with_store(|s| s.known_subjects())
+            .unwrap()
+            .contains("Kaelen"),
+        "asserting the known gap explicitly, so it is not mistaken for fixed"
+    );
+}
+
+#[tokio::test]
+async fn a_place_is_never_resolved_against_a_person() {
+    // Only characters carry identity. A place whose name happens to share a first word with the
+    // protagonist must stay itself.
+    let mut place = lore_row("Kaelen Hollow", "place", "hollow");
+    place.kind = "place".to_string();
+    let e = engine(
+        FakeGenerator::new().with_extraction(extraction_with(vec![], vec![place])),
+        FakeRenderer::new(),
+        library_with_protagonist("Kaelen Vord"),
+        FakeArtifacts::new(),
+    );
+    e.run_cycle(BufferCursor::At(0)).await.unwrap();
+
+    let lore = e.with_store(|s| s.lore()).unwrap();
+    assert!(
+        lore.iter().any(|l| l.name == "Kaelen Hollow"),
+        "the place must keep its own name: {:?}",
+        lore.iter().map(|l| &l.name).collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn two_distinct_characters_are_never_fused() {
+    // The failure this must never have: an append-only ledger cannot be un-merged.
+    let extraction = extraction_with(
+        vec![
+            delta("Kaelen Vord", "xp", "add", Some(10)),
+            delta("Kaelith", "xp", "add", Some(20)),
+            delta("Sera", "xp", "add", Some(30)),
+        ],
+        vec![
+            lore_row("Kaelith", "character", "kaelith"),
+            lore_row("Sera", "character", "sera"),
+        ],
+    );
+    let e = engine(
+        FakeGenerator::new().with_extraction(extraction),
+        FakeRenderer::new(),
+        library_with_protagonist("Kaelen Vord"),
+        FakeArtifacts::new(),
+    );
+    seed_story_with_protagonist(&e, "Kaelen Vord");
+    e.run_cycle(BufferCursor::At(0)).await.unwrap();
+
+    assert_eq!(e.snapshot_num("Kaelen Vord", "xp"), Some(10));
+    assert_eq!(
+        e.snapshot_num("Kaelith", "xp"),
+        Some(20),
+        "two edits from the protagonist is a different person"
+    );
+    assert_eq!(e.snapshot_num("Sera", "xp"), Some(30));
+}
+
+#[tokio::test]
+async fn a_gender_hint_under_a_short_name_still_reaches_the_canonical_cast_member() {
+    // The hint has to survive canonicalisation, or resolving names would break gendered casting.
+    let mut extraction = extraction_with_speakers(&[("Kaelen", Some("male"))]);
+    extraction.deltas = vec![delta("Kaelen", "xp", "add", Some(1))];
+
+    let mut library = library_with_protagonist("Kaelen");
+    library.story.protagonist = "Kaelen".to_string();
+
+    let e = Engine::new(
+        store(),
+        FakeGenerator::new().with_extraction(extraction),
+        FakeRenderer::new(),
+        library,
+        FakeArtifacts::new(),
+        gendered_config(),
+    );
+    seed_story_with_protagonist(&e, "Kaelen");
+    e.run_cycle(BufferCursor::At(0)).await.unwrap();
+
+    let cast = e.cast_pairs();
+    let kaelen = cast.iter().find(|(s, _)| s == "Kaelen").unwrap();
+    assert!(
+        kaelen.1.starts_with("azure:m"),
+        "the gender hint must still apply, got {}",
+        kaelen.1
     );
 }
 

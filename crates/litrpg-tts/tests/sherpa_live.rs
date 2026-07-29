@@ -808,3 +808,202 @@ async fn measured_rtf_from_rust_is_reported_for_comparison_with_python() {
         assert!(peak(p) > 500, "pool segment {i} silent");
     }
 }
+
+// -------------------------------- loudness at SENTENCE granularity (per-sentence manifests)
+
+fn stats(label: &str, v: &[f64]) {
+    let mut s = v.to_vec();
+    s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let q = |f: f64| s[((s.len() - 1) as f64 * f).round() as usize];
+    let mean = s.iter().sum::<f64>() / s.len() as f64;
+    let sd = (s.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / s.len() as f64).sqrt();
+    eprintln!(
+        "  {label:<26} n={:<3} min {:>6.1}  p25 {:>6.1}  med {:>6.1}  p75 {:>6.1}  max {:>6.1}  \
+         spread {:>4.1}  sd {:>4.2}",
+        s.len(),
+        s[0],
+        q(0.25),
+        q(0.50),
+        q(0.75),
+        s[s.len() - 1],
+        s[s.len() - 1] - s[0],
+        sd
+    );
+}
+
+/// Per-sentence manifests moved chapters from ~7 render parts to 50–92, and `loudnorm`
+/// runs per part. This measures whether levelling survives that, and compares the two
+/// places normalization could live.
+///
+/// Synthesis happens **once** per sentence via `probe`; the two modes are then just
+/// different post-processing of the same samples, so this costs one render, not two.
+/// Uses sherpa, so it costs no Azure quota.
+#[tokio::test]
+#[ignore = "needs sherpa models; ~4 min"]
+async fn loudness_at_sentence_granularity() {
+    use litrpg_tts::azure::split_for_requests;
+    use litrpg_tts::{FfmpegPostProcessor, PostProcess};
+
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../media/0001.json")
+        .canonicalize()
+        .expect("media/0001.json");
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&manifest).unwrap()).unwrap();
+    let turns: Vec<(String, String)> = json["segments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .take(3) // narrator + SYSTEM + the long narrator block: enough for ~40 sentences
+        .map(|s| {
+            let voice = match s["kind"].as_str().unwrap() {
+                "system" => "kokoro-multi-lang-v1_0:18".to_string(),
+                _ => CORI.to_string(),
+            };
+            (voice, s["text"].as_str().unwrap().to_string())
+        })
+        .collect();
+
+    let b = backend();
+    let post = FfmpegPostProcessor::default();
+    // ~120 chars ≈ one sentence, which is what the per-sentence manifest produces.
+    const SENTENCE_BUDGET: usize = 120;
+
+    let mut per_part_normalized = Vec::new(); // mode A: loudnorm each part
+    let mut per_part_plain = Vec::new(); // raw levels, i.e. the natural dynamics
+    let mut turn_means = Vec::new(); // mode B: loudnorm each turn once
+    let mut n_parts = 0usize;
+
+    for (ti, (voice, text)) in turns.iter().enumerate() {
+        let sentences = split_for_requests(text, SENTENCE_BUDGET);
+        n_parts += sentences.len();
+        let mut plain_turn: Vec<Pcm16k> = Vec::new();
+        let mut turn_plain_levels = Vec::new();
+
+        for (si, sentence) in sentences.iter().enumerate() {
+            // One synthesis, two post-processings.
+            let native = b.probe(voice, sentence).await.unwrap();
+            let mode_a = post
+                .process(
+                    &native.samples,
+                    native.sample_rate,
+                    PostProcess::normalized(),
+                )
+                .unwrap();
+            let plain = post
+                .process(&native.samples, native.sample_rate, PostProcess::plain())
+                .unwrap();
+
+            per_part_normalized.push(measure_lufs(&mode_a, "a"));
+            let lp = measure_lufs(&plain, "p");
+            per_part_plain.push(lp);
+            turn_plain_levels.push(lp);
+            plain_turn.push(plain);
+            let _ = si;
+        }
+
+        // Mode B: normalize the whole turn once, after concatenating its sentences.
+        let turn = post.normalize_16k(&Pcm16k::concat(&plain_turn)).unwrap();
+        let tl = measure_lufs(&turn, &format!("turn{ti}"));
+        turn_means.push(tl);
+        eprintln!(
+            "turn {ti}: {} sentences, plain spread {:.1} LU, turn-normalized to {tl:.1} LUFS",
+            sentences.len(),
+            turn_plain_levels.iter().cloned().fold(f64::MIN, f64::max)
+                - turn_plain_levels.iter().cloned().fold(f64::MAX, f64::min)
+        );
+    }
+
+    eprintln!(
+        "\n{n_parts} sentence-level parts across {} turns",
+        turns.len()
+    );
+    stats("A: loudnorm per part", &per_part_normalized);
+    stats("   plain (no loudnorm)", &per_part_plain);
+    stats("B: loudnorm per turn", &turn_means);
+
+    let spread = |v: &[f64]| {
+        v.iter().cloned().fold(f64::MIN, f64::max) - v.iter().cloned().fold(f64::MAX, f64::min)
+    };
+    let (a, plain, bmode) = (
+        spread(&per_part_normalized),
+        spread(&per_part_plain),
+        spread(&turn_means),
+    );
+    eprintln!(
+        "\nspread — per-part loudnorm {a:.1} LU | un-normalized {plain:.1} LU | \
+         per-turn loudnorm {bmode:.1} LU"
+    );
+
+    assert!(
+        n_parts >= 20,
+        "need enough parts to say anything: {n_parts}"
+    );
+
+    // Whichever place normalization lives, engines must end up level with each other.
+    // Mode B is the one that has to hold, because it is what levels turns (and so
+    // engines) against one another.
+    assert!(
+        bmode < 1.5,
+        "per-turn normalization left turns {bmode:.1} LU apart — engines are not level"
+    );
+    // Per-part normalization must not be *worse* than doing nothing, or it is actively
+    // harmful at this granularity.
+    assert!(
+        a <= plain + 0.5,
+        "per-part loudnorm widened the spread ({a:.1} LU) versus leaving it alone \
+         ({plain:.1} LU) — the estimate is unreliable on parts this short"
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs sherpa models on disk"]
+async fn the_normalize_knob_actually_changes_the_output_level() {
+    // Proves the seam that makes per-turn normalization possible: with `normalize`
+    // off, the render is un-levelled and the caller normalizes the joined turn itself.
+    let text = "The seal on the door pulsed once.";
+    let on = backend()
+        .render(
+            &RenderRequest::parse(0, &format!("sherpa:{CORI}"), text, SpeakerKind::Narrator)
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let off = backend()
+        .with_normalize(false)
+        .render(
+            &RenderRequest::parse(0, &format!("sherpa:{CORI}"), text, SpeakerKind::Narrator)
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let (lon, loff) = (measure_lufs(&on, "on"), measure_lufs(&off, "off"));
+    eprintln!("normalize on {lon:.1} LUFS | off {loff:.1} LUFS");
+
+    assert!(
+        (lon - -20.0).abs() < 2.0,
+        "normalized render should sit near -20, got {lon:.1}"
+    );
+    assert!(
+        loff < lon - 1.0,
+        "un-normalized render should be quieter than the -20 target ({loff:.1} vs {lon:.1})"
+    );
+    // Both still honour the byte contract.
+    for p in [&on, &off] {
+        assert!(p.is_whole_ms());
+        assert_eq!(p.len() as u32, p.duration_ms() * 32);
+    }
+
+    // And the recommended topology works: join un-normalized parts, normalize once.
+    let joined = Pcm16k::concat(&[off.clone(), off.clone()]);
+    let normed = litrpg_tts::FfmpegPostProcessor::default()
+        .normalize_16k(&joined)
+        .unwrap();
+    let ljoined = measure_lufs(&normed, "joined");
+    eprintln!("per-turn normalized join: {ljoined:.1} LUFS");
+    assert!(
+        (ljoined - -20.0).abs() < 1.5,
+        "per-turn normalization missed the target: {ljoined:.1}"
+    );
+}

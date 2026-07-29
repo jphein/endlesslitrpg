@@ -40,6 +40,7 @@ use litrpg_ember::{Extraction, ParsedSegment, match_lore, parse_tagged_prose};
 use litrpg_store::{NewChapter, Store};
 use tracing::{debug, info, warn};
 
+use crate::canon::{SubjectResolution, resolve_subject};
 use crate::cast::{CastAssignment, ParsedSpeaker, VoiceAssigner};
 use crate::error::{CycleOutcome, EngineError};
 use crate::ports::{Artifacts, Generator, Library, Renderer};
@@ -491,6 +492,17 @@ where
             })
         })?;
 
+        // The premise is now *in effect*: a chapter exists that was written from it. Stamped here
+        // rather than where the prompt was read, because a cycle abandoned in pass 1 produced no
+        // chapter and must leave the pending-edit warning standing. Uses the same value written to
+        // `chapters.prompt_hash` rather than re-hashing the file, so it can never record a hash no
+        // chapter actually used.
+        if let Err(e) = self.library.set_prompt_hash(&prompt_hash) {
+            // Bookkeeping, so it must not cost the chapter (§10). The cost of failure is a stale
+            // pending-edit warning, which the next chapter clears.
+            warn!(chapter = number, error = %e, "could not record the prompt hash now in effect");
+        }
+
         // The canonical permanent artifact (§8). Written here rather than in the render
         // stage because the text ships even when audio fails, and a failure to write it must
         // not cost the chapter either — the prose is already durable in `chapters.text_md`.
@@ -502,12 +514,41 @@ where
         let mut applied = 0usize;
         let mut rejected = 0usize;
         if let Some(e) = &extraction {
+            // Canonicalise every name before it becomes durable identity (issue #11). Without
+            // this, `litrpg init --protagonist "Kaelen"` against a prompt saying "Kaelen Vord"
+            // gives one character two ledger keys, with his stats split so neither view is
+            // complete — and an append-only ledger cannot be un-split afterwards.
+            let known_before = self.with_store(|s| s.known_subjects())?;
+            let canon = |proposed: &str| -> String {
+                let r = resolve_subject(proposed, &known_before, &story.protagonist);
+                match &r {
+                    SubjectResolution::Aliased { from, to } => {
+                        info!(%from, %to, "resolved a character name onto the established one")
+                    }
+                    SubjectResolution::Ambiguous { name, candidates } => warn!(
+                        %name,
+                        ?candidates,
+                        "character name matches several established ones; left as written rather \
+                         than guessing, because a wrong merge cannot be undone"
+                    ),
+                    _ => {}
+                }
+                r.name().to_string()
+            };
+
             for l in &e.new_lore {
                 // `always_on` is false: the model does not get to decide that an entry is
                 // injected into every future chapter.
+                // Only characters carry identity; a place called "Ashen Vale" must not be
+                // resolved against a person.
+                let lore_name = if l.kind.eq_ignore_ascii_case("character") {
+                    canon(&l.name)
+                } else {
+                    l.name.clone()
+                };
                 self.with_store(|s| {
                     s.upsert_lore(
-                        &l.name,
+                        &lore_name,
                         &l.kind,
                         &l.keywords,
                         &l.body_md,
@@ -531,12 +572,12 @@ where
             let mut wanted: BTreeMap<String, String> = BTreeMap::new();
             for sp in &e.speakers {
                 if let Some(g) = sp.gender_hint() {
-                    wanted.insert(sp.name.trim().to_lowercase(), g.to_string());
+                    wanted.insert(canon(&sp.name).to_lowercase(), g.to_string());
                 }
             }
             for l in &e.new_lore {
                 if let Some(g) = l.gender_hint() {
-                    wanted.insert(l.name.trim().to_lowercase(), g.to_string());
+                    wanted.insert(canon(&l.name).to_lowercase(), g.to_string());
                 }
             }
             if !wanted.is_empty() && !new_cast.is_empty() {
@@ -571,7 +612,19 @@ where
 
             for pd in &e.deltas {
                 let delta = match pd.to_delta() {
-                    Ok(d) => d,
+                    Ok(mut d) => {
+                        // Resolved against the subjects known *after* `new_lore` landed, so a
+                        // character this chapter introduced anchors its own deltas.
+                        d.subject = {
+                            let known_now = self.with_store(|s| s.known_subjects())?;
+                            let r = resolve_subject(&d.subject, &known_now, &story.protagonist);
+                            if let SubjectResolution::Aliased { from, to } = &r {
+                                info!(%from, %to, "resolved a delta subject onto the established name");
+                            }
+                            r.name().to_string()
+                        };
+                        d
+                    }
                     Err(err) => {
                         warn!(%err, "discarding a delta with an illegal op");
                         rejected += 1;

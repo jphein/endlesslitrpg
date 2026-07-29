@@ -177,6 +177,10 @@ pub struct StatusReport {
     pub rejection_rate: f64,
     pub top_rejections: Vec<RejectionCount>,
     pub prompt: PromptSync,
+    /// Re-checked here as well as at `init`, because editing `prompt.md` can introduce
+    /// the mismatch long after setup.
+    pub protagonist: String,
+    pub protagonist_check: crate::naming::ProtagonistCheck,
     /// Duplicates `prompt`'s `Pending` tag on purpose: a script wants a stable
     /// top-level boolean, not a match on the enum tag.
     pub prompt_edit_pending: bool,
@@ -219,10 +223,25 @@ pub fn status(store: &Store, buffer_target: u32, story_dir: &Path) -> Result<Sta
         .collect();
 
     let prompt = prompt_sync(store, story_dir)?;
+    let protagonist = store.story()?.map(|r| r.protagonist).unwrap_or_default();
+    let protagonist_check = match &prompt {
+        // Only meaningful against a prompt that exists; the prompt block already
+        // reports the missing-file and not-initialised cases.
+        PromptSync::InSync { .. } | PromptSync::Pending { .. } => {
+            let row_path = store.story()?.map(|r| r.prompt_path).unwrap_or_default();
+            crate::naming::check_protagonist_file(
+                &protagonist,
+                &litrpg_config::resolve_path(Path::new(&row_path), story_dir),
+            )?
+        }
+        _ => crate::naming::ProtagonistCheck::Unset,
+    };
 
     Ok(StatusReport {
         prompt_edit_pending: prompt.edit_pending(),
         prompt,
+        protagonist,
+        protagonist_check,
         latest_chapter,
         total_chapters: chapters.len(),
         chapters_with_audio,
@@ -243,6 +262,13 @@ pub fn status(store: &Store, buffer_target: u32, story_dir: &Path) -> Result<Sta
 /// lines and is prefixed when it warrants attention, per §6.2.
 /// Prompt-sync block. `InSync` renders nothing — a status command that says
 /// "everything is fine" about every subsystem trains you to stop reading it.
+fn render_protagonist(out: &mut String, r: &StatusReport) {
+    if let Some(w) = crate::naming::warning(&r.protagonist_check, &r.protagonist) {
+        out.push_str(&w);
+        out.push('\n');
+    }
+}
+
 fn render_prompt_sync(out: &mut String, r: &StatusReport) {
     match &r.prompt {
         PromptSync::InSync { .. } => {}
@@ -289,6 +315,7 @@ fn render_prompt_sync(out: &mut String, r: &StatusReport) {
 pub fn render_text(r: &StatusReport) -> String {
     let mut out = String::new();
     render_prompt_sync(&mut out, r);
+    render_protagonist(&mut out, r);
 
     out.push_str("Chapters\n");
     out.push_str(&format!("  latest            {}\n", r.latest_chapter));

@@ -80,6 +80,15 @@ pub trait Library: Send + Sync {
     /// Persist a chapter summary. Idempotent by chapter — a re-extraction of a
     /// `state_dirty` chapter must replace, not duplicate.
     fn put_summary(&self, chapter: u32, body_md: &str) -> Result<(), EngineError>;
+
+    /// Record the prompt hash now **in effect**.
+    ///
+    /// `story.prompt_hash` means "the premise chapters are currently being written from", which is
+    /// why `litrpg prompt` deliberately does not touch it: an edited file is *pending* until a
+    /// chapter boundary picks it up. This is the other half of that contract — without it, "in
+    /// effect" silently degrades to "in effect as of `init`", and `litrpg status` reports a pending
+    /// edit forever even though the edit has demonstrably been applied.
+    fn set_prompt_hash(&self, hash: &str) -> Result<(), EngineError>;
 }
 
 /// Chapter artifacts on disk (§8). Behind a trait so the cycle's tests need no

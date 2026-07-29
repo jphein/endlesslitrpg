@@ -67,6 +67,10 @@ pub struct InitReport {
     /// Flags that were supplied but not applied because a story row already exists
     /// and `--force` was not given. Reported rather than silently dropped.
     pub ignored_flags: Vec<String>,
+    /// Whether the protagonist recorded on the story row is actually named in the
+    /// prompt. A mismatch is silent at runtime — deltas are rejected or filed under a
+    /// second identity — so setup is the cheapest place to catch it.
+    pub protagonist_check: crate::naming::ProtagonistCheck,
     /// True when `--force` was given but the existing config loaded fine and so was
     /// left alone. Reported for the same reason as `ignored_flags`: accepting a flag
     /// and quietly not acting on it is worse than refusing it.
@@ -310,6 +314,9 @@ pub fn init(config_path: Option<&Path>, opts: &InitOptions) -> Result<(Config, I
     let schema_version = store.schema_version()?;
 
     let story = ensure_story(&store, config, &prompt_path, &prompt_hash, opts)?;
+    // After both the prompt file and the protagonist are known.
+    let protagonist_check =
+        crate::naming::check_protagonist_file(&story.protagonist, &prompt_path)?;
 
     let report = InitReport {
         config_path: config_path.map(Path::to_path_buf),
@@ -327,6 +334,7 @@ pub fn init(config_path: Option<&Path>, opts: &InitOptions) -> Result<(Config, I
         protagonist: story.protagonist,
         target_words: story.target_words,
         prompt_is_placeholder,
+        protagonist_check,
         ignored_flags: story.ignored_flags,
         config_kept_despite_force: opts.force && config_action == Action::Existed,
     };
@@ -374,6 +382,11 @@ pub fn render_text(r: &InitReport) -> String {
         for d in &r.dirs_created {
             out.push_str(&format!("    {}\n", d.display()));
         }
+    }
+
+    if let Some(w) = crate::naming::warning(&r.protagonist_check, &r.protagonist) {
+        out.push('\n');
+        out.push_str(&w);
     }
 
     if r.config_kept_despite_force {

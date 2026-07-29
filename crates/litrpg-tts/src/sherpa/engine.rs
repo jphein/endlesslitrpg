@@ -124,6 +124,8 @@ struct Worker {
     cfg: Arc<SherpaConfig>,
     engines: HashMap<String, Engine>,
     post: FfmpegPostProcessor,
+    /// See [`SherpaBackend::with_normalize`].
+    normalize: bool,
 }
 
 impl Worker {
@@ -177,13 +179,20 @@ impl Worker {
         }
         let native = self.synthesize(req.voice_remainder(), &req.text)?;
 
-        // Resample to the 16 kHz boundary contract, colour SYSTEM blocks, and
-        // loudness-normalize — one ffmpeg pass, <2% of synthesis cost.
-        self.post.process(
-            &native.samples,
-            native.sample_rate,
-            PostProcess::for_kind(req.kind),
-        )
+        // Resample to the 16 kHz boundary contract and colour SYSTEM blocks.
+        //
+        // `normalize` is a *caller* decision, because the right granularity for
+        // loudness normalization is the **speaker turn**, not the render part — and
+        // since per-sentence manifests landed those are no longer the same thing.
+        // Measured over 63 sentence-level parts: normalizing per part levels engines to
+        // 1.2 LU but flattens 7.8 LU of natural sentence-to-sentence dynamics to 1.2;
+        // normalizing per turn levels engines to **0.1 LU** *and* keeps the dynamics.
+        // See `SherpaBackend::with_normalize`.
+        let mut pp = PostProcess::for_kind(req.kind);
+        if !self.normalize {
+            pp = pp.without_loudnorm();
+        }
+        self.post.process(&native.samples, native.sample_rate, pp)
     }
 }
 
@@ -235,6 +244,8 @@ impl NativeRender {
 pub struct SherpaBackend {
     cfg: Arc<SherpaConfig>,
     workers: Vec<Arc<Mutex<Worker>>>,
+    /// See [`SherpaBackend::with_normalize`].
+    normalize: bool,
     /// Computed once at construction. `available()` is called on every dispatch,
     /// and probing `ffmpeg -version` per segment would be absurd; call
     /// [`SherpaBackend::refresh_availability`] after installing models.
@@ -252,12 +263,14 @@ impl SherpaBackend {
                     cfg: Arc::clone(&cfg),
                     engines: HashMap::new(),
                     post: post.clone(),
+                    normalize: true,
                 }))
             })
             .collect();
         Self {
             cfg,
             workers,
+            normalize: true,
             availability,
         }
     }
@@ -278,6 +291,39 @@ impl SherpaBackend {
 
     pub fn config(&self) -> &SherpaConfig {
         &self.cfg
+    }
+
+    /// Choose where loudness normalization happens.
+    ///
+    /// `true` (default) normalizes **every render call**. That was right when a render
+    /// call was a whole speaker turn. With per-sentence manifests it is no longer:
+    /// measured across 63 sentence-level parts of a real chapter,
+    ///
+    /// | normalization | engines level to | sentence dynamics |
+    /// |---|---|---|
+    /// | per part (default) | 1.2 LU | flattened 7.8 → 1.2 LU |
+    /// | per turn, via [`crate::FfmpegPostProcessor::normalize_16k`] | **0.1 LU** | **preserved** |
+    ///
+    /// Per-turn wins on both counts, because levelling *engines* against each other is
+    /// the actual goal and levelling *sentences* against each other is collateral —
+    /// a whispered aside and an emphatic line should not come out at the same level.
+    ///
+    /// So a caller rendering sentence-by-sentence should pass `false` here, concatenate
+    /// a turn's parts, and call `normalize_16k` once on the result. The Azure backend
+    /// already works this way internally: it normalizes after joining a segment's
+    /// chunks, not per chunk.
+    #[must_use]
+    pub fn with_normalize(mut self, enabled: bool) -> Self {
+        for w in &self.workers {
+            w.lock().unwrap_or_else(|e| e.into_inner()).normalize = enabled;
+        }
+        self.normalize = enabled;
+        self
+    }
+
+    /// Whether each render call is loudness-normalized.
+    pub fn normalize(&self) -> bool {
+        self.normalize
     }
 
     /// Re-probe models and ffmpeg.

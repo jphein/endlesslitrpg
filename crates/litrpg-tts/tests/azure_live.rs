@@ -894,3 +894,213 @@ async fn a_permanent_rejection_is_not_retried() {
         "took {wall:?} — a permanent 400 appears to have been retried"
     );
 }
+
+// ============ #2 at per-sentence granularity: one render, four numbers ============
+
+fn dist(label: &str, v: &[f64]) {
+    let mut s = v.to_vec();
+    s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let q = |f: f64| s[((s.len() - 1) as f64 * f).round() as usize];
+    let mean = s.iter().sum::<f64>() / s.len() as f64;
+    let sd = (s.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / s.len() as f64).sqrt();
+    eprintln!(
+        "  {label:<28} n={:<3} min {:>6.1} p10 {:>6.1} p25 {:>6.1} med {:>6.1} p75 {:>6.1} \
+         p90 {:>6.1} max {:>6.1}  spread {:>4.1}  sd {:>4.2}",
+        s.len(),
+        s[0],
+        q(0.10),
+        q(0.25),
+        q(0.50),
+        q(0.75),
+        q(0.90),
+        s[s.len() - 1],
+        s[s.len() - 1] - s[0],
+        sd
+    );
+}
+
+/// **Closes #2 at the granularity actually shipped.** Parts 7–8 measured a full chapter
+/// at *turn* granularity; per-sentence manifests changed the unit, so this re-measures
+/// there.
+///
+/// One Azure render, four numbers: per-part loudness distribution, chunk joins,
+/// per-request wall against each request's own `timeout_for_chars`, and the byte
+/// invariant. `render_parts` returns **un-normalized** audio, so both normalization
+/// topologies are evaluated from the same paid-for render.
+///
+/// ⚠️ ~8 200 chars of quota — the same as a turn-granularity run, since splitting does
+/// not change the characters billed.
+#[tokio::test]
+#[ignore = "spends ~8200 chars of Azure quota; the per-sentence #2 report"]
+async fn per_sentence_chapter_report() {
+    use litrpg_tts::azure::{MAX_CHARS_PER_REQUEST, split_for_requests};
+
+    // The live story's observed max part size.
+    const SENTENCE_BUDGET: usize = 200;
+
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../media/0001.json")
+        .canonicalize()
+        .expect("media/0001.json");
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&manifest).unwrap()).unwrap();
+
+    // One request per sentence, as the engine now does.
+    let mut turns: Vec<(u32, &str, Vec<String>)> = Vec::new();
+    for s in json["segments"].as_array().unwrap() {
+        let kind = s["kind"].as_str().unwrap();
+        let voice = if kind == "system" {
+            "azure:en-US-Steffan:DragonHDLatestNeural"
+        } else {
+            "azure:en-GB-Ada:DragonHDLatestNeural"
+        };
+        let sentences = split_for_requests(s["text"].as_str().unwrap(), SENTENCE_BUDGET);
+        turns.push((s["idx"].as_u64().unwrap() as u32, voice, sentences));
+    }
+    let n_parts: usize = turns.iter().map(|(_, _, p)| p.len()).sum();
+    let total_chars: usize = turns
+        .iter()
+        .flat_map(|(_, _, p)| p.iter())
+        .map(|s| s.chars().count())
+        .sum();
+    eprintln!(
+        "\n=== per-sentence chapter: {} turns -> {n_parts} parts, {total_chars} chars, \
+         sentence budget {SENTENCE_BUDGET}, request budget {MAX_CHARS_PER_REQUEST} ===",
+        turns.len()
+    );
+
+    let b = backend();
+    let post = litrpg_tts::FfmpegPostProcessor::default();
+
+    let mut worst_used = 0.0f64;
+    let mut worst_desc = String::new();
+    let mut raw_levels = Vec::new();
+    let mut per_part_normed = Vec::new();
+    let mut turn_normed = Vec::new();
+    let mut turn_pcms: Vec<Pcm16k> = Vec::new();
+    let mut chunk_splits = 0usize;
+    let retries_observed = 0usize;
+
+    let started = std::time::Instant::now();
+    for (idx, voice, sentences) in &turns {
+        let mut raw_parts: Vec<Pcm16k> = Vec::new();
+        for (si, sentence) in sentences.iter().enumerate() {
+            let r = req(*idx, voice, sentence, SpeakerKind::Narrator);
+            let parts = b.render_parts(&r).await.unwrap();
+            // A sentence-sized request is far under MAX_CHARS_PER_REQUEST, so
+            // `split_for_requests` inside render_one is a no-op: at this granularity
+            // the chunk-join seam does not exist. Recorded rather than assumed.
+            if parts.len() > 1 {
+                chunk_splits += 1;
+            }
+            for p in &parts {
+                if p.budget_used() > worst_used {
+                    worst_used = p.budget_used();
+                    worst_desc = format!(
+                        "turn {idx} sentence {si}: {} chars, {:.1}s of {:.0}s budget",
+                        p.chars,
+                        p.wall.as_secs_f64(),
+                        p.budget.as_secs_f64()
+                    );
+                }
+                raw_levels.push(lufs(&p.pcm, "raw").unwrap());
+                // Mode A: normalize this part on its own.
+                per_part_normed.push(lufs(&post.normalize_16k(&p.pcm).unwrap(), "a").unwrap());
+                raw_parts.push(p.pcm.clone());
+            }
+        }
+        // Mode B: normalize the whole turn once.
+        let turn = post.normalize_16k(&Pcm16k::concat(&raw_parts)).unwrap();
+        turn_normed.push(lufs(&turn, "b").unwrap());
+        turn_pcms.push(turn);
+    }
+    let wall = started.elapsed();
+
+    // ---------------- 1. per-part loudness distribution
+    eprintln!("\n[1] loudness distribution over {n_parts} sentence-level parts");
+    dist("raw (un-normalized)", &raw_levels);
+    dist("A: loudnorm per part", &per_part_normed);
+    dist("B: loudnorm per turn", &turn_normed);
+    let sp = |v: &[f64]| {
+        v.iter().cloned().fold(f64::MIN, f64::max) - v.iter().cloned().fold(f64::MAX, f64::min)
+    };
+
+    // ---------------- 2. chunk joins
+    eprintln!(
+        "\n[2] chunk joins: {chunk_splits} of {n_parts} parts needed splitting \
+         (a sentence is far below the {MAX_CHARS_PER_REQUEST}-char request budget, so the \
+         chunk-join seam of Parts 7-8 does not arise at this granularity)"
+    );
+
+    // ---------------- 3. timeout headroom
+    eprintln!(
+        "\n[3] worst timeout headroom: {:.0}% of budget  [{worst_desc}]",
+        worst_used * 100.0
+    );
+
+    // ---------------- 4. byte invariant + manifest slicing
+    let chapter = litrpg_tts::assemble(&turn_pcms, litrpg_tts::DEFAULT_GAP_MS);
+    eprintln!(
+        "\n[4] chapter: {} B = {:.1} s audio in {:.1} s sequential wall; \
+         whole-chapter {:.1} LUFS; retries observed {retries_observed}",
+        chapter.pcm.len(),
+        chapter.pcm.duration_secs_f64(),
+        wall.as_secs_f64(),
+        lufs(&chapter.pcm, "whole").unwrap()
+    );
+    eprintln!(
+        "    spread — raw {:.1} LU | per-part {:.1} LU | per-turn {:.1} LU",
+        sp(&raw_levels),
+        sp(&per_part_normed),
+        sp(&turn_normed)
+    );
+
+    // ================= assertions =================
+    assert!(
+        n_parts >= 30,
+        "only {n_parts} parts; not per-sentence granularity"
+    );
+
+    // [3] no request near its ceiling.
+    assert!(
+        worst_used < 0.5,
+        "a request used {:.0}% of its timeout budget: {worst_desc}",
+        worst_used * 100.0
+    );
+
+    // [1] levelling must survive the finer granularity, whichever topology is used.
+    assert!(
+        sp(&per_part_normed) < 2.0,
+        "per-part loudness spread {:.1} LU across {n_parts} parts",
+        sp(&per_part_normed)
+    );
+    assert!(
+        sp(&turn_normed) < 1.5,
+        "per-turn spread {:.1} LU — engines are not level",
+        sp(&turn_normed)
+    );
+    // The defect must still reproduce un-normalized, or normalization is dead weight.
+    assert!(
+        sp(&raw_levels) > 2.0,
+        "raw spread only {:.1} LU",
+        sp(&raw_levels)
+    );
+
+    // [4] byte invariant and manifest offsets.
+    assert!(chapter.pcm.is_whole_ms());
+    assert_eq!(chapter.pcm.len() as u32, chapter.pcm.duration_ms() * 32);
+    assert_eq!(
+        chapter.pcm.len() as f64,
+        32_000.0 * (chapter.pcm.duration_ms() as f64 / 1000.0)
+    );
+    assert_eq!(chapter.spans.len(), turn_pcms.len());
+    for (span, src) in chapter.spans.iter().zip(&turn_pcms) {
+        let slice = &chapter.pcm.as_bytes()[span.start_byte() as usize..span.end_byte() as usize];
+        assert_eq!(slice.len(), src.len(), "span length");
+        assert_eq!(slice, src.as_bytes(), "span content drifted");
+    }
+    assert!(
+        chapter.pcm.duration_secs_f64() > 300.0,
+        "not a full-length chapter"
+    );
+}

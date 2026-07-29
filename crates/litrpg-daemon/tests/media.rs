@@ -233,6 +233,43 @@ async fn only_the_canonical_zero_padded_name_is_accepted() {
     }
 }
 
+/// `CHAPTER_DIGITS` is a **minimum, not a width**, so an endless serial must stay
+/// addressable past chapter 9999. A route that demanded exactly four digits would 400
+/// every chapter from 10000 on — and 10000 is a real number for a story with no end.
+#[tokio::test]
+async fn chapters_past_four_digits_are_addressable() {
+    let f = fixture();
+
+    // Five and six digit chapters, written straight into the media root.
+    for n in [10_000u32, 123_456] {
+        let name = litrpg_core::pcm_name(n);
+        assert_eq!(name, format!("{n}.pcm"), "no truncation past the minimum");
+        std::fs::write(f.media_dir().join(&name), expected(0, 64)).unwrap();
+
+        let resp = f.get(&format!("/media/{name}")).await;
+        assert_status(&resp, StatusCode::OK);
+        assert_eq!(body_bytes(resp).await, expected(0, 64));
+    }
+}
+
+/// Canonicalisation must follow `litrpg-core`, not a local `{:04}` — this validates the
+/// names core generates, so the two must agree by construction.
+#[tokio::test]
+async fn canonical_form_tracks_core_for_every_width() {
+    use litrpg_daemon::media::{MediaKind, parse_media_name};
+
+    for n in [0u32, 1, 42, 999, 1000, 9999, 10_000, 123_456] {
+        let name = litrpg_core::pcm_name(n);
+        let (parsed, kind) = parse_media_name(&name)
+            .unwrap_or_else(|e| panic!("core-generated {name:?} must parse, got {e}"));
+        assert_eq!(parsed, n);
+        assert_eq!(kind, MediaKind::Pcm);
+    }
+
+    // Over-padding a five-digit chapter is still non-canonical and still rejected.
+    assert!(parse_media_name("010000.pcm").is_err());
+}
+
 /// `..%2f..%2fetc%2fpasswd` style attempts must not read a real file even if the
 /// router decodes them into a single segment.
 #[tokio::test]

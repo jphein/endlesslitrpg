@@ -396,6 +396,12 @@ pub fn fixture_progress(total: u32, with_audio: u32) -> Fixture {
 }
 
 impl Fixture {
+    /// The temp media root, so a test can place an extra artifact (e.g. a
+    /// five-digit chapter) without a bespoke fixture.
+    pub fn media_dir(&self) -> &std::path::Path {
+        self._media.path()
+    }
+
     pub async fn get(&self, uri: &str) -> Response<Body> {
         self.request(Request::builder().uri(uri).body(Body::empty()).unwrap())
             .await

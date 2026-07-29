@@ -16,6 +16,7 @@ use axum::extract::{Path, State};
 use axum::http::header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, RANGE};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
+use litrpg_core::{CHAPTER_DIGITS, chapter_stem, media_name};
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
@@ -55,11 +56,16 @@ impl MediaKind {
 /// Parse `NNNN.pcm` / `NNNN.mp3` into a chapter number and kind.
 ///
 /// **This is the path-traversal boundary.** The request's path segment is never used
-/// to build a filename; only the parsed `u32` is, via `format!("{n:04}.{ext}")`. So
+/// to build a filename; only the parsed `u32` is, via `litrpg_core::media_name`. So
 /// `../../etc/passwd`, `0000.pcm/../../x`, a percent-encoded separator, or a NUL byte
 /// all fail here at `parse::<u32>()` rather than being sanitised — rejecting
 /// non-numeric input outright is a much smaller thing to get right than filtering
 /// hostile paths.
+///
+/// The canonical-form check below compares against [`chapter_stem`] rather than a local
+/// `{:04}`. That matters more than it looks: this function *validates* the names
+/// `litrpg-core` *generates*, so a hardcoded width here would silently start rejecting
+/// core's own filenames the moment `CHAPTER_DIGITS` changed.
 pub fn parse_media_name(name: &str) -> ApiResult<(u32, MediaKind)> {
     let (stem, ext) = name
         .rsplit_once('.')
@@ -90,12 +96,15 @@ pub fn parse_media_name(name: &str) -> ApiResult<(u32, MediaKind)> {
         .parse()
         .map_err(|_| ApiError::BadRequest(format!("media name is not a chapter number: {stem}")))?;
 
-    // Insist on the canonical zero-padded spelling, so exactly one URL addresses each
-    // chapter: `0001.pcm` yes, `1.pcm` and `00001.pcm` no. (`{n:04}` widens naturally
-    // past chapter 9999, so this stays correct as the serial grows.)
-    if format!("{n:04}") != stem {
+    // Insist on the canonical spelling, so exactly one URL addresses each chapter:
+    // `0001.pcm` yes, `1.pcm` and `00001.pcm` no. `CHAPTER_DIGITS` is a *minimum*, not a
+    // width, so chapter 12345 canonicalises to `12345` and stays addressable — a check
+    // that demanded exactly four digits would 400 every chapter past 9999.
+    let canonical = chapter_stem(n);
+    if canonical != stem {
         return Err(ApiError::BadRequest(format!(
-            "media name must be zero-padded to 4 digits: expected {n:04}, got {stem}"
+            "media name must be zero-padded to at least {CHAPTER_DIGITS} digits: \
+             expected {canonical}, got {stem}"
         )));
     }
 
@@ -114,10 +123,7 @@ pub async fn serve_media(
     headers: HeaderMap,
 ) -> ApiResult<Response> {
     let (n, kind) = parse_media_name(&name)?;
-    let path = state
-        .config
-        .media_root
-        .join(format!("{n:04}.{}", kind.ext()));
+    let path = state.config.media_root.join(media_name(n, kind.ext()));
 
     let meta = tokio::fs::metadata(&path)
         .await

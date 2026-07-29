@@ -5,6 +5,7 @@ use std::sync::Arc;
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use litrpg_core::manifest::Manifest;
+use litrpg_core::{mp3_name, pcm_name};
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
@@ -122,10 +123,10 @@ pub async fn list_chapters(
             state_dirty: c.state_dirty,
             pcm_url: c
                 .has_audio
-                .then(|| format!("{base}/media/{:04}.pcm", c.number)),
+                .then(|| format!("{base}/media/{}", pcm_name(c.number))),
             mp3_url: c
                 .has_audio
-                .then(|| format!("{base}/media/{:04}.mp3", c.number)),
+                .then(|| format!("{base}/media/{}", mp3_name(c.number))),
             // duration_ms * 32, the same identity the manifest precomputes. Exact
             // because every segment is zero-padded to a 32-byte boundary (spec §8.1).
             total_bytes: c
@@ -178,8 +179,12 @@ pub async fn get_chapter(
         duration_ms: row.duration_ms,
         has_audio: row.has_audio,
         state_dirty: row.state_dirty,
-        pcm_url: row.has_audio.then(|| format!("{base}/media/{n:04}.pcm")),
-        mp3_url: row.has_audio.then(|| format!("{base}/media/{n:04}.mp3")),
+        pcm_url: row
+            .has_audio
+            .then(|| format!("{base}/media/{}", pcm_name(n))),
+        mp3_url: row
+            .has_audio
+            .then(|| format!("{base}/media/{}", mp3_name(n))),
         manifest_contiguous: manifest.is_contiguous(),
         manifest,
     }))

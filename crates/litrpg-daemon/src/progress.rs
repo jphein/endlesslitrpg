@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::State;
+use litrpg_core::{mp3_name, pcm_name};
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
@@ -91,8 +92,8 @@ async fn snapshot(state: &Arc<AppState>) -> ApiResult<ProgressResponse> {
         // `chapters_since` is ordered by number, so the first row is the next chapter.
         next_chapter: ahead.first().map(|c| c.number),
         next_playable,
-        next_pcm_url: next_playable.map(|n| format!("{base}/media/{n:04}.pcm")),
-        next_mp3_url: next_playable.map(|n| format!("{base}/media/{n:04}.mp3")),
+        next_pcm_url: next_playable.map(|n| format!("{base}/media/{}", pcm_name(n))),
+        next_mp3_url: next_playable.map(|n| format!("{base}/media/{}", mp3_name(n))),
         initialised,
     })
 }

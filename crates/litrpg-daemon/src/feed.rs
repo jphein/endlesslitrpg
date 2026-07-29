@@ -9,6 +9,7 @@ use axum::extract::State;
 use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
+use litrpg_core::mp3_name;
 
 use crate::AppState;
 use crate::datetime::rfc2822_utc;
@@ -53,7 +54,7 @@ pub async fn get_feed(State(state): State<Arc<AppState>>) -> ApiResult<impl Into
     let mut items = String::new();
     // Newest first: readers present items in document order.
     for c in rows.iter().filter(|c| c.has_audio).rev() {
-        let path = state.config.media_root.join(format!("{:04}.mp3", c.number));
+        let path = state.config.media_root.join(mp3_name(c.number));
 
         // `enclosure/@length` is a byte count, so it must come from the file rather
         // than an estimate; clients use it for progress and range planning.
@@ -69,7 +70,7 @@ pub async fn get_feed(State(state): State<Arc<AppState>>) -> ApiResult<impl Into
         // an old chapter to the top of every subscriber's feed.
         let published_secs = c.created_at / 1000;
 
-        let url = format!("{base}/media/{:04}.mp3", c.number);
+        let url = format!("{base}/media/{}", mp3_name(c.number));
         let title = xml_escape(&format!("Chapter {}: {}", c.number, c.title));
         let link = xml_escape(&format!("{base}/api/chapters/{}", c.number));
 

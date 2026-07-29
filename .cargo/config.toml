@@ -1,0 +1,29 @@
+# This file's purpose is to EXIST. It intentionally sets nothing.
+#
+# `fambuild` — JP's mandated build path as of 2026-07-29 — copies the esp32c6-watch's
+# `.cargo/config.toml` into any worktree that lacks one:
+#
+#     CANON_CFG="/home/jp/Projects/esp32c6-watch/.cargo/config.toml"
+#     if [ -f "$CANON_CFG" ] && [ ! -f "$SRC/.cargo/config.toml" ]; then ...
+#
+# That default is correct for its own repo, where the file is gitignored so fresh
+# worktrees genuinely need it supplied. It is wrong here, in two ways:
+#
+#   1. That config carries `[build] target = "riscv32imac-unknown-none-elf"` and
+#      `[unstable] build-std`. This workspace is a server: rusqlite with bundled SQLite
+#      C, reqwest, tokio, and sherpa-onnx native libraries. Told to build for bare-metal
+#      RISC-V it fails — loudly, which is the only mercy in it.
+#   2. It carries an `[env]` block with `WIFI_SSID`, `WIFI_PASS` and other credentials.
+#      Copying it would write the watch's secrets into an endlesslitrpg build directory
+#      on familiar, where nothing here needs them and nobody would think to look.
+#
+# The guard is `[ ! -f "$SRC/.cargo/config.toml" ]`, so the presence of this file is the
+# whole fix. **Do not delete it as dead configuration, and do not gitignore it** — it has
+# to reach every worktree, which is exactly what the watch's version cannot do.
+#
+# Deliberately empty of settings: adding any would make it look like configuration and
+# invite someone to "clean up" the parts that do nothing. Every line here is a comment
+# because every line here is the reason.
+#
+# Better fix, not ours to make: gate that copy on the worktree actually being an
+# esp32c6-watch checkout. Raised with JP.

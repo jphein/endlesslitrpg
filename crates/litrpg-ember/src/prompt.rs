@@ -67,14 +67,28 @@ pub struct Pass1Input<'a> {
 /// that identical state produces an identical prompt — which matters because
 /// `chapters.prompt_hash` is the provenance column (§9.3).
 ///
-/// Matching is plain substring containment, as specified. That means a keyword of `ash`
-/// also fires on `cash`; keep keywords specific.
+/// # Matching is word-bounded, not plain substring
+///
+/// A keyword matches when the whole keyword phrase occurs with a **non-alphanumeric
+/// character or a string edge at each end**. So the keyword `ash` fires on `ash`, `Ash.`
+/// and `ash,` but *not* on `cash` or `ashen`.
+///
+/// Plain substring containment was the obvious reading of "a keyword appears in the scan
+/// text", and it is the wrong contract: `ash` matching `cash` injects lore about the wrong
+/// entity *and* spends context on it, and the failure is invisible — no error, just a
+/// chapter that quietly drifts off-canon.
+///
+/// Boundaries are applied to the **phrase**, not per word, so a multi-word keyword like
+/// `Ashen Vale` matches `the ashen vale, at dusk` as one unit. Internal spacing must match
+/// the keyword literally.
 pub fn match_lore<'a>(entries: &'a [LoreEntry], scan_text: &str) -> Vec<&'a LoreEntry> {
     let scan = scan_text.to_lowercase();
 
     let mut hits: Vec<&LoreEntry> = entries
         .iter()
-        .filter(|e| e.always_on || keywords_of(e).any(|k| scan.contains(&k.to_lowercase())))
+        .filter(|e| {
+            e.always_on || keywords_of(e).any(|k| contains_bounded(&scan, &k.to_lowercase()))
+        })
         .collect();
 
     hits.sort_by(|a, b| {
@@ -83,6 +97,54 @@ pub fn match_lore<'a>(entries: &'a [LoreEntry], scan_text: &str) -> Vec<&'a Lore
             .then_with(|| a.name.cmp(&b.name))
     });
     hits
+}
+
+/// Whether `needle` occurs in `haystack` bounded by non-alphanumeric characters or string
+/// edges. Both arguments must already be lowercased.
+///
+/// Scans every occurrence rather than stopping at the first: `ashen ash` contains an
+/// unbounded `ash` at index 0 and a bounded one at index 6, and only checking the first
+/// would report no match.
+fn contains_bounded(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+
+    let mut from = 0;
+    while let Some(offset) = haystack[from..].find(needle) {
+        let start = from + offset;
+        let end = start + needle.len();
+
+        // `char::is_alphanumeric` is Unicode-aware, so an accented name behaves like a
+        // word rather than like punctuation.
+        let open = start == 0
+            || !haystack[..start]
+                .chars()
+                .next_back()
+                .is_some_and(char::is_alphanumeric);
+        let close = end == haystack.len()
+            || !haystack[end..]
+                .chars()
+                .next()
+                .is_some_and(char::is_alphanumeric);
+
+        if open && close {
+            return true;
+        }
+
+        // Advance by a single character, not by the needle's length: a bounded occurrence
+        // can *overlap* an unbounded one when the keyword itself contains punctuation
+        // (needle `a-a` in `xa-a-a` matches boundedly at index 3, inside the unbounded
+        // match at index 1). Skipping the whole needle would miss it.
+        let step = haystack[start..]
+            .chars()
+            .next()
+            .map_or(1, char::len_utf8)
+            .max(1);
+        from = start + step;
+    }
+
+    false
 }
 
 /// Non-empty, trimmed keywords. A trailing comma must not yield an empty keyword —
@@ -186,6 +248,8 @@ loot and quest notifications, and [CharacterName] for spoken dialogue.
 own voice and that casting is permanent.
 - Put a blank line between blocks. After a [SYSTEM] block, start the next line with an \
 explicit tag.
+- A blank line ends the current speaker's block. If the same speaker continues after a \
+blank line, repeat the tag — an untagged paragraph after a blank line is read as narration.
 - No markdown headings, no chapter number, no title, no commentary about the task, no \
 author's note.
 - Numbers are the engine's job, not yours: state changes in prose or in a [SYSTEM] block, \

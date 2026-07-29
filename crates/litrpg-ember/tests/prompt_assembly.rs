@@ -132,6 +132,93 @@ fn an_entry_with_no_keywords_and_no_always_on_never_matches() {
 }
 
 // ---------------------------------------------------------------------------
+// Word-bounded matching. Plain substring containment injects lore about the wrong
+// entity and burns context doing it, and the failure is invisible -- no error, just
+// a chapter that quietly drifts off-canon.
+// ---------------------------------------------------------------------------
+
+fn matches(keywords: &str, scan: &str) -> bool {
+    let entries = vec![lore("Probe", keywords, 0, false)];
+    !match_lore(&entries, scan).is_empty()
+}
+
+#[test]
+fn a_keyword_matches_when_bounded_by_non_alphanumerics_or_string_edges() {
+    assert!(matches("ash", "ash"), "the whole scan text is the keyword");
+    assert!(matches("ash", "the ash fell"), "bounded by spaces");
+    assert!(matches("ash", "Ash."), "a full stop is a boundary");
+    assert!(matches("ash", "ash,"), "a comma is a boundary");
+    assert!(matches("ash", "wet ash"), "boundary at the string edge");
+    assert!(matches("ash", "(ash)"), "brackets are boundaries");
+    assert!(matches("ash", "iron-ash"), "a hyphen is a boundary");
+    assert!(matches("ash", "\"ash\""), "quotes are boundaries");
+    assert!(matches("ash", "ash\nfell"), "a newline is a boundary");
+}
+
+#[test]
+fn a_keyword_does_not_fire_on_a_longer_word_that_contains_it() {
+    assert!(!matches("ash", "cash"), "prefix must not match");
+    assert!(!matches("ash", "ashen"), "suffix must not match");
+    assert!(!matches("ash", "cashew"), "infix must not match");
+    assert!(!matches("ash", "Ashen Vale"), "ashen is not ash");
+    assert!(!matches("vale", "valentine"), "vale is not valentine");
+}
+
+#[test]
+fn a_bounded_occurrence_is_found_even_after_an_unbounded_one() {
+    // "ashen" comes first and must not short-circuit the scan for the real "ash".
+    assert!(
+        matches("ash", "the ashen vale, and then ash"),
+        "every occurrence must be checked, not just the first"
+    );
+    assert!(matches("ash", "cash ash"));
+}
+
+#[test]
+fn multi_word_keywords_match_as_a_whole_phrase() {
+    assert!(matches(
+        "ashen vale",
+        "They rode into the ashen vale, at dusk."
+    ));
+    assert!(matches("ashen vale", "The Ashen Vale"), "case-insensitive");
+    assert!(
+        !matches("ashen vale", "the ashen valence"),
+        "the phrase's trailing boundary applies to the phrase, not to its first word"
+    );
+    assert!(
+        !matches("ashen vale", "ashen  vale"),
+        "internal spacing must match the keyword literally"
+    );
+}
+
+#[test]
+fn boundary_matching_is_unicode_aware() {
+    assert!(matches("kaelén", "Kaelén drew his blade."));
+    assert!(
+        !matches("kael", "Kaelén"),
+        "an accented letter is a word character, not punctuation"
+    );
+}
+
+#[test]
+fn pass1_tells_the_model_to_repeat_a_tag_after_a_blank_line() {
+    // The parser resets to `narrator` on a blank line, which is what stops narration
+    // after a [SYSTEM] block being read in the robotic voice. The cost -- a speaker's
+    // block split by a blank line -- is recovered here, in the prompt.
+    let text = pass1_messages(&sample_input(&[], &[], &[]))
+        .iter()
+        .map(|m| m.content.clone())
+        .collect::<Vec<_>>()
+        .join("\n")
+        .to_lowercase();
+    assert!(
+        text.contains("repeat the tag"),
+        "the model must be told to repeat the tag when a speaker continues past a blank line"
+    );
+    assert!(text.contains("blank line"));
+}
+
+// ---------------------------------------------------------------------------
 // State snapshot rendering
 // ---------------------------------------------------------------------------
 

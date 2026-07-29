@@ -23,6 +23,11 @@ WorkingDirectory=/home/jp/Projects/endlesslitrpg
 
 Environment=LITRPG_CONFIG=/home/jp/Projects/endlesslitrpg/litrpg.toml
 Environment=RUST_LOG=info
+# Client-facing base URL. Must NOT be derived from bind_addr: binding 0.0.0.0 is
+# correct (serve every interface) but "http://0.0.0.0:8093" is not reachable by
+# anything, so every pcm_url, mp3_url and RSS enclosure would be broken for the
+# watch, Candela and any podcast app while working perfectly in a local curl.
+Environment=LITRPG_BASE_URL=http://10.0.6.129:8093
 
 ExecStart=/home/jp/Projects/endlesslitrpg/target/release/litrpg-daemon
 

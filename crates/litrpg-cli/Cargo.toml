@@ -6,6 +6,12 @@ license.workspace = true
 rust-version.workspace = true
 description = "litrpg command line: prompt editing, director notes, status, cast, rewind"
 
+# Logic lives in the lib so it can be tested against an in-memory Store without
+# spawning a process; main.rs is only argument parsing and printing.
+[lib]
+name = "litrpg_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "litrpg"
 path = "src/main.rs"
@@ -16,5 +22,9 @@ litrpg-store = { workspace = true }
 litrpg-config = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
+thiserror = { workspace = true }
 serde = { workspace = true, features = ["std"] }
 serde_json = { workspace = true, features = ["std"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }

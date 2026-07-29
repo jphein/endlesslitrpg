@@ -11,3 +11,7 @@ serde = { workspace = true, features = ["std"] }
 toml = { workspace = true }
 thiserror = { workspace = true }
 dirs = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+

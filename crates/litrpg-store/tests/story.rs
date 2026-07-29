@@ -129,3 +129,49 @@ fn the_story_table_stays_a_singleton() {
     assert_eq!(s.title, "C");
     assert_eq!(s.protagonist, "Z");
 }
+
+#[test]
+fn the_playback_cursor_starts_at_zero_and_records_progress() {
+    let store = Store::open_in_memory().unwrap();
+    // No story row yet: "nothing listened to" is the honest answer, not an error,
+    // because the engine reads this every cycle.
+    assert_eq!(store.consumed_through().unwrap(), 0);
+
+    store.upsert_story(&new_story("Endless", "Kaelen")).unwrap();
+    assert_eq!(store.consumed_through().unwrap(), 0);
+
+    store.set_consumed_through(7).unwrap();
+    assert_eq!(store.consumed_through().unwrap(), 7);
+    assert_eq!(store.story().unwrap().unwrap().consumed_through, 7);
+
+    // Going backwards is allowed — re-listening is legitimate, and a cursor that
+    // only ratchets forward is a high-water mark, not a position.
+    store.set_consumed_through(3).unwrap();
+    assert_eq!(store.consumed_through().unwrap(), 3);
+}
+
+#[test]
+fn recording_progress_without_a_story_is_an_error() {
+    let store = Store::open_in_memory().unwrap();
+    let err = store.set_consumed_through(1).unwrap_err();
+    assert!(err.to_string().contains("no story row"), "{err}");
+}
+
+/// The explicit column list in `upsert_story` protects this for free — the same
+/// decision that saved `arc_outline_md`. `litrpg init --force` to fix a title must
+/// not silently reset how far someone has listened.
+#[test]
+fn upsert_preserves_the_playback_cursor() {
+    let store = Store::open_in_memory().unwrap();
+    store.upsert_story(&new_story("Endless", "Kaelen")).unwrap();
+    store.set_consumed_through(12).unwrap();
+
+    store.upsert_story(&new_story("The Ashen Ledger", "Kaelen Vord")).unwrap();
+
+    let s = store.story().unwrap().unwrap();
+    assert_eq!(s.title, "The Ashen Ledger");
+    assert_eq!(
+        s.consumed_through, 12,
+        "upsert_story reset the playback cursor — init --force must never do that"
+    );
+}

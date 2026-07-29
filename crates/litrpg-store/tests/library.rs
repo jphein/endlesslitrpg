@@ -5,6 +5,7 @@
 //! would quietly collapse to always-on entries with nothing reporting a fault.
 
 use litrpg_core::manifest::{Manifest, Segment, SpeakerKind};
+use litrpg_store::migrations::TARGET_VERSION;
 use litrpg_store::{NewChapter, Store};
 
 fn store() -> Store {
@@ -22,8 +23,8 @@ fn chapter(number: u32) -> NewChapter {
 }
 
 #[test]
-fn migrations_reach_version_two() {
-    assert_eq!(store().schema_version().unwrap(), 2);
+fn migrations_reach_the_target_version() {
+    assert_eq!(store().schema_version().unwrap(), TARGET_VERSION);
 }
 
 #[test]

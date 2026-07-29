@@ -1,0 +1,68 @@
+# endless-litrpg configuration.
+#
+# The story lives inside the project folder, so everything — database, audio,
+# and the prompt — is in one place you can back up, move, or inspect together.
+# Point the tools at this file with:
+#
+#     export LITRPG_CONFIG=/home/jp/Projects/endlesslitrpg/litrpg.toml
+#
+# `story/prompt.md` is deliberately NOT gitignored: §9.3 makes it the git-tracked
+# source of truth for the story, so its history is your history. `data/`, `media/`
+# and `models/` are ignored — they are generated, and a chapter is ~25 MB of PCM.
+
+db_path   = "/home/jp/Projects/endlesslitrpg/data/story.db"
+media_dir = "/home/jp/Projects/endlesslitrpg/media"
+story_dir = "/home/jp/Projects/endlesslitrpg/story"
+
+# Ember — the local Qwen3.6-35B-A3B lane on familiar.
+ember_url   = "http://familiar:8091"
+ember_model = "qwen36-coder"
+
+# The daemon's HTTP surface. Plain HTTP on the admin VLAN: the ESP32-C6 watch
+# cannot do TLS or DNS, so it reaches this at a literal 10.0.6.107:8093.
+bind_addr = "0.0.0.0:8093"
+
+# Chapters to keep rendered ahead of the playback cursor. Minimum 2 — with one,
+# the listener runs dry during the next chapter's render.
+buffer_target = 3
+
+# ~2000 words is about 13 minutes of narration at a natural pace.
+target_words = 2000
+
+# Voices. Local sherpa by default: free, offline, and unmetered, which matters for
+# a story that never ends. Swap any of these for an `azure:` ref to use DragonHD.
+#
+# cori is en_GB female, single-speaker, trained on LibriVox audiobook narration —
+# and being en-GB it preserves Ember's accent signature from agent-orchestration.md.
+narrator_voice = "sherpa:piper-en_GB-cori-high:0"
+
+# A neutral speaker; the robotic RPG-terminal character comes from a post-render
+# ffmpeg filter chain, not from the model (§7.4).
+system_voice = "sherpa:kokoro-multi-lang-v1_0:24"
+
+# Kokoro's labelled English speakers, interleaved Am-male / Am-female / Br-male /
+# Br-female so a growing cast stays distinct instead of exhausting one group. Once
+# the pool is spent the assigner wraps and two characters share a voice — a defect
+# only ever discovered by listening, by which point the cast table has made it
+# permanent.
+character_voices = [
+  "sherpa:kokoro-multi-lang-v1_0:18",
+  "sherpa:kokoro-multi-lang-v1_0:3",
+  "sherpa:kokoro-multi-lang-v1_0:26",
+  "sherpa:kokoro-multi-lang-v1_0:21",
+  "sherpa:kokoro-multi-lang-v1_0:11",
+  "sherpa:kokoro-multi-lang-v1_0:9",
+  "sherpa:kokoro-multi-lang-v1_0:27",
+  "sherpa:kokoro-multi-lang-v1_0:20",
+  "sherpa:kokoro-multi-lang-v1_0:13",
+  "sherpa:kokoro-multi-lang-v1_0:0",
+  "sherpa:kokoro-multi-lang-v1_0:24",
+  "sherpa:kokoro-multi-lang-v1_0:22",
+  "sherpa:kokoro-multi-lang-v1_0:16",
+  "sherpa:kokoro-multi-lang-v1_0:7",
+  "sherpa:kokoro-multi-lang-v1_0:25",
+  "sherpa:kokoro-multi-lang-v1_0:23",
+]
+
+# Seconds to sleep between cycles when there is nothing to do.
+poll_interval_secs = 45

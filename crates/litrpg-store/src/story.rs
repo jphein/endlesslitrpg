@@ -29,10 +29,17 @@ pub struct StoryRow {
     pub arc_outline_md: String,
     pub target_words: u32,
     pub updated_at: i64,
+    /// Highest chapter the listener has finished — the playback cursor.
+    ///
+    /// Set by whoever knows: `litrpg listened <N>` today, the watch or a Candela
+    /// source later. Preserved across `upsert_story` for the same reason
+    /// `arc_outline_md` is: `litrpg init --force` must not silently reset how far
+    /// someone has listened.
+    pub consumed_through: u32,
 }
 
-const STORY_COLUMNS: &str =
-    "title, protagonist, prompt_path, prompt_hash, arc_outline_md, target_words, updated_at";
+const STORY_COLUMNS: &str = "title, protagonist, prompt_path, prompt_hash, arc_outline_md, \
+     target_words, updated_at, consumed_through";
 
 impl Store {
     pub fn story(&self) -> Result<Option<StoryRow>> {
@@ -48,6 +55,7 @@ impl Store {
                 arc_outline_md: r.get(4)?,
                 target_words: r.get::<_, i64>(5)? as u32,
                 updated_at: r.get(6)?,
+                consumed_through: r.get::<_, i64>(7)? as u32,
             })),
             None => Ok(None),
         }
@@ -110,6 +118,40 @@ impl Store {
                 now_ms()
             ],
         )?;
+        Ok(())
+    }
+
+    /// The playback cursor: highest chapter the listener has finished.
+    ///
+    /// `0` when there is no story row, because "nothing has been listened to" is the
+    /// honest answer for a story that does not exist yet — this is read on every
+    /// engine cycle and should not need a story row to succeed.
+    pub fn consumed_through(&self) -> Result<u32> {
+        let n: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT consumed_through FROM story ORDER BY id LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .ok();
+        Ok(n.unwrap_or(0) as u32)
+    }
+
+    /// Record how far the listener has got.
+    ///
+    /// Going backwards is allowed — re-listening is legitimate, and refusing it would
+    /// make the cursor a ratchet rather than a position. Errors when there is no story
+    /// row, because silently recording progress against a story that does not exist is
+    /// how a cursor ends up meaning nothing.
+    pub fn set_consumed_through(&self, chapter: u32) -> Result<()> {
+        let n = self.conn.execute(
+            "UPDATE story SET consumed_through = ?1, updated_at = ?2",
+            params![chapter, now_ms()],
+        )?;
+        if n == 0 {
+            return Err(StoreError::NoStoryRow);
+        }
         Ok(())
     }
 

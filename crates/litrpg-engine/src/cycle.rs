@@ -101,12 +101,17 @@ pub struct EngineConfig {
     /// the engine holds a [`Renderer`] rather than a registry. Empty disables gendered casting
     /// entirely — the feature is additive.
     pub voice_genders: BTreeMap<String, litrpg_tts::Gender>,
-    /// Backend ids the TTS registry actually has loaded, e.g. `["azure"]`. Populated by the
-    /// caller. Empty means "unknown", and then no substitution happens.
+    /// Backend ids the TTS registry **actually has loaded**, e.g. `["azure"]`.
     ///
-    /// Needed because the `cast` table can hold a `voice_ref` for a backend this process did not
-    /// load — a row written by a sherpa-enabled build, read by an Azure-only one.
-    pub renderable_backends: Vec<String>,
+    /// Populated from `TtsRegistry::availability()`, never from the config file, and named to make
+    /// that unmissable: config says what was *asked for*, the registry says what this process can
+    /// *serve*, and the gap between the two is the bug that let a `sherpa:` cast render in an Azure
+    /// voice for four chapters with nothing to notice it. A config-sourced value here would make
+    /// the heartbeat report `sherpa` on a binary that does not have it — an instrument that lies in
+    /// exactly the case it exists for.
+    ///
+    /// Empty means "unknown", and then no substitution happens.
+    pub registered_backends: Vec<String>,
     /// Emit one manifest entry per **sentence** rather than per speaker turn (§9.4).
     ///
     /// Turn-level entries cannot drive sentence highlighting: measured on live chapter 1, the
@@ -129,7 +134,7 @@ impl Default for EngineConfig {
             system_voice: crate::cast::SYSTEM_VOICE.to_string(),
             character_voices: crate::cast::character_pool(),
             voice_genders: BTreeMap::new(),
-            renderable_backends: Vec::new(),
+            registered_backends: Vec::new(),
             sentence_manifest: true,
             summary_window: SUMMARY_WINDOW,
         }
@@ -145,7 +150,7 @@ impl EngineConfig {
             system_voice: c.system_voice.clone(),
             character_voices: c.character_voices.clone(),
             voice_genders: BTreeMap::new(),
-            renderable_backends: Vec::new(),
+            registered_backends: Vec::new(),
             sentence_manifest: true,
             summary_window: SUMMARY_WINDOW,
         }
@@ -290,6 +295,36 @@ where
         f(&guard).map_err(EngineError::Store)
     }
 
+    /// Record that this process is alive, and what it can actually render.
+    ///
+    /// `pid` and `version` are evaluated **here**, in the engine crate: `litrpg-store` is linked
+    /// into the CLI and the daemon too, so reading them there would describe whichever process
+    /// happened to call and report the store's version rather than the engine's.
+    ///
+    /// Never fails a cycle. This is an observability write, so §10's rule — a bookkeeping failure
+    /// must not cost a chapter — applies with more force here, not less: losing a chapter to a
+    /// failed liveness stamp would be the instrument causing the outage it exists to report.
+    ///
+    /// # Called at phase boundaries, not only at the top
+    ///
+    /// A once-per-cycle stamp cannot distinguish "crashed during TTS" from "still rendering" for a
+    /// whole cycle, which for a chapter is minutes. Stamping after each phase bounds staleness by
+    /// the **longest single phase** rather than by the whole cycle.
+    ///
+    /// What that does and does not buy, precisely: it does **not** detect a mid-TTS crash promptly,
+    /// because nothing stamps *inside* the render. It bounds the stale window to the longest phase —
+    /// measured on the live serial, generation ≈ 60 s and render ≈ 140 s — so a threshold of around
+    /// five minutes catches a crash instead of fifteen. Seconds-level detection would need the
+    /// stamp inside the TTS batch loop, which is `litrpg-tts`'s call, not the engine's.
+    fn stamp_heartbeat(&self) {
+        let backends = self.config.registered_backends.clone();
+        if let Err(e) = self.with_store(|s| {
+            s.stamp_engine_heartbeat(std::process::id(), env!("CARGO_PKG_VERSION"), &backends)
+        }) {
+            warn!(error = %e, "could not stamp the engine heartbeat; carrying on");
+        }
+    }
+
     /// Resolve the buffer baseline for this cycle.
     ///
     /// `Stored` hits the database every time it is called, which is the behaviour that makes a
@@ -309,6 +344,11 @@ where
     /// `cursor` fixes where the rendered-ahead buffer measures from; see [`BufferCursor`].
     pub async fn run_cycle(&self, cursor: BufferCursor) -> Result<CycleOutcome, EngineError> {
         let consumed_through = self.resolve_cursor(cursor)?;
+        // Unconditionally, and before any branch: a heartbeat that only fires when work happens
+        // goes stale on a healthy engine that has caught up, and then every caller has to
+        // distinguish "idle" from "dead" — the one question this row exists to answer.
+        self.stamp_heartbeat();
+
         // ---- 0. Resume ------------------------------------------------------
         // A chapter with prose but no audio means either a crash between publish stages
         // or an earlier TTS failure. Re-render it; never regenerate prose that has
@@ -333,7 +373,7 @@ where
                     // process did not load.
                     for (speaker, voice) in crate::voices::substitute_unrenderable(
                         &mut planned,
-                        &self.config.renderable_backends,
+                        &self.config.registered_backends,
                         &self.config.narrator_voice,
                         &self.config.system_voice,
                         &self.config.character_voices,
@@ -429,6 +469,10 @@ where
                 });
             }
         };
+
+        // Pass 1 is the longest Ember phase; stamping here bounds the stale window to it rather
+        // than to the whole cycle.
+        self.stamp_heartbeat();
 
         // ---- 4. Parse + assign voices ---------------------------------------
         let parsed = parse_tagged_prose(&prose);
@@ -675,12 +719,16 @@ where
             self.library.put_summary(number, &e.summary)?;
         }
 
+        // Immediately before the longest phase, so a crash inside TTS shows as staleness measured
+        // from the render's start rather than from the cycle's.
+        self.stamp_heartbeat();
+
         // ---- 8 + 9. Render and publish --------------------------------------
         // A `cast` row can name a backend this process did not load. Substitute before
         // rendering, or one such row costs the whole chapter's audio.
         for (speaker, voice) in crate::voices::substitute_unrenderable(
             &mut planned,
-            &self.config.renderable_backends,
+            &self.config.registered_backends,
             &self.config.narrator_voice,
             &self.config.system_voice,
             &self.config.character_voices,
@@ -694,6 +742,8 @@ where
         }
 
         let has_audio = self.render_and_publish(number, &planned).await;
+
+        self.stamp_heartbeat();
 
         // ---- 10. Notes are consumed once the chapter is durable --------------
         // Unconditional on the render: the notes were honoured by the prose, which is
@@ -851,6 +901,12 @@ where
             .remove(&number);
     }
 
+    /// Rebuild the planned segments for an already-written chapter, exposed so a test can check
+    /// that a re-render honours the cast rather than replaying stored voices.
+    pub fn replan_for_test(&self, number: u32) -> Result<Vec<PlannedSegment>, EngineError> {
+        self.replan_from_store(number)
+    }
+
     /// Rebuild the planned segments for an already-written chapter, for a resumed render.
     ///
     /// Prefers the persisted `segments` rows; falls back to re-parsing `text_md` when a
@@ -859,14 +915,51 @@ where
     fn replan_from_store(&self, number: u32) -> Result<Vec<PlannedSegment>, EngineError> {
         let segments = self.with_store(|s| s.segments(number))?;
         if !segments.is_empty() {
+            // The stored rows supply the chapter's *content* — idx, speaker, kind, text — because
+            // that has already been published and must not change. The **voice is re-derived from
+            // the cast**, which is the authoritative identity, rather than reused from the row.
+            //
+            // A segment's `voice_ref` records what was *rendered*, not what the character's voice
+            // *is*. Reusing it makes a re-render faithfully reproduce whatever the last render
+            // happened to use, which defeats the entire purpose of §9.2's `litrpg render N`
+            // ("re-render audio only, e.g. after a cast change") — a cast override could never take
+            // effect. It is also what made a substituted voice permanent: chapters rendered by an
+            // Azure-only build stayed Azure even when re-rendered by a build that had sherpa,
+            // because the rows kept saying Azure while the cast said cori.
+            let cast: Vec<(String, String)> = self
+                .with_store(|s| s.cast())?
+                .into_iter()
+                .map(|c| (c.speaker, c.voice_ref))
+                .collect();
+
             return Ok(segments
                 .into_iter()
-                .map(|s| PlannedSegment {
-                    idx: s.idx,
-                    speaker: s.speaker,
-                    kind: s.kind,
-                    voice_ref: s.voice_ref,
-                    text: s.text,
+                .map(|s| {
+                    let voice_ref = match cast
+                        .iter()
+                        .find(|(sp, _)| sp.eq_ignore_ascii_case(&s.speaker))
+                        .map(|(_, v)| v.clone())
+                    {
+                        Some(v) => v,
+                        None => {
+                            // Should be impossible — and that is exactly why it warns. A rendered
+                            // segment naming a speaker the cast has forgotten would otherwise
+                            // happen quietly and stay that way for months.
+                            warn!(
+                                speaker = %s.speaker,
+                                chapter = number,
+                                "segment references a speaker with no cast row; reusing the stored voice"
+                            );
+                            s.voice_ref
+                        }
+                    };
+                    PlannedSegment {
+                        idx: s.idx,
+                        speaker: s.speaker,
+                        kind: s.kind,
+                        voice_ref,
+                        text: s.text,
+                    }
                 })
                 .collect());
         }

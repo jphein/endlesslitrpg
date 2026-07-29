@@ -275,9 +275,26 @@ async fn run(args: Args) -> Result<ExitCode, Box<dyn std::error::Error>> {
         voice_genders,
         // So a `cast` row naming an unloaded backend is substituted rather than costing the
         // chapter's audio.
-        renderable_backends: ready.clone(),
+        registered_backends: ready.clone(),
         ..base
     };
+
+    // The cast owns an established voice and config only seeds new ones, so a config edit against
+    // an existing cast row does nothing. Correct, but silent — so say it once, at startup.
+    let cast: Vec<(String, String)> = store
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .cast()?
+        .into_iter()
+        .map(|c| (c.speaker, c.voice_ref))
+        .collect();
+    for note in litrpg_engine::voices::config_cast_divergence(
+        &cast,
+        &engine_config.narrator_voice,
+        &engine_config.system_voice,
+    ) {
+        warn!("{note}");
+    }
 
     // ---- Ember -------------------------------------------------------------
     let generator = EmberGenerator::from_config(&config)?;

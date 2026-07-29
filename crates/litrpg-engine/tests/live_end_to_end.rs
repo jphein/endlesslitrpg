@@ -158,7 +158,7 @@ async fn one_real_chapter_end_to_end() {
         // Gender metadata straight from the registry, so a pass-2 gender hint is matched
         // against what Azure actually advertises.
         voice_genders: registry_genders(&registry),
-        renderable_backends: registry.ids().iter().map(|s| s.to_string()).collect(),
+        registered_backends: registry.ids().iter().map(|s| s.to_string()).collect(),
         sentence_manifest: true,
         summary_window: 5,
     };
@@ -544,7 +544,7 @@ async fn a_second_cycle_never_rewrites_published_prose() {
             system_voice: AZURE_SYSTEM.to_string(),
             character_voices: AZURE_CHARACTERS.iter().map(|s| s.to_string()).collect(),
             voice_genders: Default::default(),
-            renderable_backends: vec!["azure".to_string()],
+            registered_backends: vec!["azure".to_string()],
             sentence_manifest: true,
             summary_window: 5,
         },

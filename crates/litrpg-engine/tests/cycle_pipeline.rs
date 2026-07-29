@@ -797,6 +797,152 @@ async fn an_established_character_is_never_re_voiced_by_a_late_hint() {
 }
 
 // ---------------------------------------------------------------------------
+// The engine heartbeat. It exists because nothing compared what the cast asked
+// for against what the process could serve, so a `sherpa:` cast rendered in an
+// Azure voice for four chapters with no symptom but the sound.
+// ---------------------------------------------------------------------------
+
+fn engine_with_backends(backends: &[&str]) -> FakeEngine {
+    Engine::new(
+        store(),
+        FakeGenerator::new(),
+        FakeRenderer::new(),
+        FakeLibrary::new(),
+        FakeArtifacts::new(),
+        EngineConfig {
+            registered_backends: backends.iter().map(|b| b.to_string()).collect(),
+            ..config()
+        },
+    )
+}
+
+#[tokio::test]
+async fn a_produced_cycle_stamps_the_heartbeat() {
+    let e = engine_with_backends(&["azure", "sherpa"]);
+    e.run_cycle(BufferCursor::At(0)).await.unwrap();
+
+    let hb = e
+        .with_store(|s| s.engine_heartbeat())
+        .unwrap()
+        .expect("a cycle must leave a heartbeat");
+    assert_eq!(hb.pid, std::process::id() as i64, "must be *this* process");
+    assert_eq!(
+        hb.version,
+        env!("CARGO_PKG_VERSION"),
+        "the engine's version"
+    );
+    assert_eq!(
+        hb.backends,
+        vec!["azure".to_string(), "sherpa".to_string()],
+        "what the process can serve"
+    );
+    assert!(hb.seen_at > 0);
+}
+
+/// The case the heartbeat is *for*: a build without `--features sherpa` registers a smaller
+/// registry and then substitutes silently. The row has to show `["azure"]` so the mismatch against
+/// a `sherpa:` cast row is visible from outside the process.
+#[tokio::test]
+async fn the_heartbeat_reports_only_the_backends_actually_loaded() {
+    let e = engine_with_backends(&["azure"]);
+    e.run_cycle(BufferCursor::At(0)).await.unwrap();
+    let hb = e.with_store(|s| s.engine_heartbeat()).unwrap().unwrap();
+    assert_eq!(hb.backends, vec!["azure".to_string()]);
+    assert!(
+        !hb.backends.contains(&"sherpa".to_string()),
+        "reporting a backend this build lacks would be an instrument that lies"
+    );
+}
+
+/// Phase stamps: a produced chapter refreshes the heartbeat several times, so a crash mid-cycle
+/// leaves a timestamp from the current phase rather than from the cycle's start.
+#[tokio::test]
+async fn a_produced_cycle_stamps_at_phase_boundaries() {
+    let e = engine_with_backends(&["azure"]);
+    e.run_cycle(BufferCursor::At(0)).await.unwrap();
+
+    // The store keeps one row (last-writer-wins), so the observable is that it advanced past the
+    // top-of-cycle stamp rather than a count. Asserted via a second cycle to get an ordering.
+    let first = e
+        .with_store(|s| s.engine_heartbeat())
+        .unwrap()
+        .unwrap()
+        .seen_at;
+    e.run_cycle(BufferCursor::Drain).await.unwrap();
+    let second = e
+        .with_store(|s| s.engine_heartbeat())
+        .unwrap()
+        .unwrap()
+        .seen_at;
+    assert!(second >= first, "each cycle must refresh the heartbeat");
+}
+
+#[tokio::test]
+async fn an_idle_cycle_still_stamps_the_heartbeat() {
+    // The whole point: a caught-up engine is healthy, and a heartbeat that only fires when work
+    // happens would go stale and read as dead.
+    let e = engine_with_backends(&["azure"]);
+    for _ in 0..3 {
+        e.run_cycle(BufferCursor::At(0)).await.unwrap();
+    }
+    let before = e
+        .with_store(|s| s.engine_heartbeat())
+        .unwrap()
+        .unwrap()
+        .seen_at;
+
+    assert!(matches!(
+        e.run_cycle(BufferCursor::At(0)).await.unwrap(),
+        CycleOutcome::Idle { .. }
+    ));
+    let after = e
+        .with_store(|s| s.engine_heartbeat())
+        .unwrap()
+        .unwrap()
+        .seen_at;
+    assert!(after >= before, "an idle cycle must refresh the heartbeat");
+}
+
+#[tokio::test]
+async fn an_abandoned_cycle_still_stamps_the_heartbeat() {
+    // Ember being unreachable is exactly when someone asks "is the engine even running".
+    let e = Engine::new(
+        store(),
+        FakeGenerator::new().push_pass1(Err(EmberError::Transport {
+            detail: "down".into(),
+        })),
+        FakeRenderer::new(),
+        FakeLibrary::new(),
+        FakeArtifacts::new(),
+        EngineConfig {
+            registered_backends: vec!["azure".to_string()],
+            ..config()
+        },
+    );
+    assert!(matches!(
+        e.run_cycle(BufferCursor::At(0)).await.unwrap(),
+        CycleOutcome::Abandoned { .. }
+    ));
+    assert!(
+        e.with_store(|s| s.engine_heartbeat()).unwrap().is_some(),
+        "a failing engine is still a running engine"
+    );
+}
+
+#[tokio::test]
+async fn no_heartbeat_at_all_is_distinguishable_from_a_stale_one() {
+    // `None` means nothing has ever run here; a stale timestamp means something ran and stopped.
+    // Callers should say different things, so the engine must not pre-seed a row.
+    let e = engine_with_backends(&["azure"]);
+    assert!(
+        e.with_store(|s| s.engine_heartbeat()).unwrap().is_none(),
+        "constructing an engine must not stamp anything"
+    );
+    e.run_cycle(BufferCursor::At(0)).await.unwrap();
+    assert!(e.with_store(|s| s.engine_heartbeat()).unwrap().is_some());
+}
+
+// ---------------------------------------------------------------------------
 // `story.prompt_hash` means "the premise now in effect". `litrpg prompt`
 // deliberately does not write it, so the engine restamping it at a chapter
 // boundary is what stops `litrpg status` reporting a pending edit forever.
@@ -1796,6 +1942,55 @@ async fn a_recovered_render_clears_the_stuck_marker() {
     ));
     assert_eq!(e.resume_attempts(1), 0, "a success must clear the counter");
     assert!(e.stuck_chapters().unwrap().is_empty());
+}
+
+/// §9.2 makes `litrpg render N` "re-render audio only (e.g. after a cast change)". That is only
+/// deliverable if a re-render takes its voices from the **cast** rather than from the segment rows
+/// the last render wrote — otherwise a re-render faithfully reproduces whatever was used before and
+/// a cast override can never take effect.
+///
+/// Observed live: chapters rendered by an Azure-only build stayed Azure even when re-rendered by a
+/// build that had sherpa, because the rows said Azure while the cast said cori.
+#[tokio::test]
+async fn a_resume_takes_its_voices_from_the_cast_not_from_the_stored_segments() {
+    // Chapter 1 renders and stores segment rows with the voices of the moment.
+    let e = engine(
+        FakeGenerator::new(),
+        FakeRenderer::new(),
+        FakeLibrary::new(),
+        FakeArtifacts::new(),
+    );
+    e.run_cycle(BufferCursor::At(0)).await.unwrap();
+    let original: Vec<String> = e.segments(1).into_iter().map(|s| s.voice_ref).collect();
+    assert!(!original.is_empty());
+
+    // An operator re-casts the narrator, exactly as `litrpg cast` would.
+    e.with_store(|s| s.upsert_cast("narrator", "azure:recast-narrator", "narrator", 1))
+        .unwrap();
+
+    // Force a re-render of the same chapter.
+    let planned = e.replan_for_test(1).unwrap();
+    let narrator_voices: Vec<&String> = planned
+        .iter()
+        .filter(|p| p.speaker == "narrator")
+        .map(|p| &p.voice_ref)
+        .collect();
+    assert!(!narrator_voices.is_empty(), "the chapter has narration");
+    for v in narrator_voices {
+        assert_eq!(
+            v, "azure:recast-narrator",
+            "a re-render must honour the cast, not replay the stored voice"
+        );
+    }
+
+    // The published content is untouched — only the voice is re-derived.
+    let stored = e.segments(1);
+    assert_eq!(planned.len(), stored.len());
+    for (p, s) in planned.iter().zip(stored.iter()) {
+        assert_eq!(p.idx, s.idx);
+        assert_eq!(p.speaker, s.speaker);
+        assert_eq!(p.text, s.text, "prose that has shipped must not change");
+    }
 }
 
 #[tokio::test]

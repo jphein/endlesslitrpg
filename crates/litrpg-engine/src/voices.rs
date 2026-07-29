@@ -212,6 +212,49 @@ pub fn substitute_unrenderable(
     decided
 }
 
+/// Report where `litrpg.toml` disagrees with the `cast` table about an established voice.
+///
+/// # Ownership: the cast owns a voice; config seeds it
+///
+/// Stated plainly because "it works out" is how this class of bug survives. Both places carry the
+/// narrator and system voices, and the resolution is:
+///
+/// * **`cast` is the owner.** Every lookup — fresh parse and resume alike — hits the cast first, so
+///   once a speaker has a row, that row decides what they sound like. This is what makes a voice
+///   *permanent*, which is the property continuity depends on.
+/// * **Config seeds a voice** at a speaker's first appearance, and never again. `plan_segments`'s
+///   fallback to `narrator_voice` is unreachable in practice, because step 4 casts every speaker
+///   before planning; it exists so an impossible state renders in the wrong voice rather than
+///   dropping a segment.
+///
+/// The consequence, and the reason this function exists: **editing `narrator_voice` in the config of
+/// a story that already has a cast row does nothing at all.** That is correct under the ownership
+/// rule, and it is silent, which is not. `litrpg cast` is the way to change an established voice, so
+/// a divergence is worth saying out loud at startup rather than leaving someone to wonder why their
+/// edit had no effect.
+pub fn config_cast_divergence(
+    cast: &[(String, String)],
+    narrator_voice: &str,
+    system_voice: &str,
+) -> Vec<String> {
+    let mut notes = Vec::new();
+    for (role, configured) in [("narrator", narrator_voice), ("SYSTEM", system_voice)] {
+        let Some((_, cast_voice)) = cast.iter().find(|(sp, _)| sp.eq_ignore_ascii_case(role))
+        else {
+            continue; // not cast yet, so config will seed it — no divergence
+        };
+        if cast_voice != configured {
+            notes.push(format!(
+                "config sets the {role} voice to {configured:?} but the cast row says \
+                 {cast_voice:?}; the cast wins, so this chapter will sound like {cast_voice:?}. \
+                 Use `litrpg cast` to change an established voice — editing the config only \
+                 affects speakers cast from now on."
+            ));
+        }
+    }
+    notes
+}
+
 /// Round-robin the voices across gender groups.
 ///
 /// Same reasoning as the Kokoro pool in [`crate::cast`]: a small cast should span the
@@ -428,6 +471,55 @@ mod tests {
     /// `SYSTEM` hold `sherpa:` rows. An Azure-only build then lost the whole chapter's audio to
     /// `no TTS backend registered with id 'sherpa'`, because the startup preflight validates
     /// configuration and never looks at the cast table.
+    #[test]
+    fn a_config_edit_that_the_cast_overrides_is_reported() {
+        let cast = vec![
+            ("narrator".to_string(), "sherpa:cori:0".to_string()),
+            ("SYSTEM".to_string(), "sherpa:kokoro:24".to_string()),
+        ];
+
+        // Agreement is silent.
+        assert!(config_cast_divergence(&cast, "sherpa:cori:0", "sherpa:kokoro:24").is_empty());
+
+        // A narrator edit that will not take effect says so, and names both sides.
+        let notes = config_cast_divergence(&cast, "azure:en-GB-Ada", "sherpa:kokoro:24");
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains("narrator"));
+        assert!(
+            notes[0].contains("azure:en-GB-Ada"),
+            "the ignored value: {}",
+            notes[0]
+        );
+        assert!(
+            notes[0].contains("sherpa:cori:0"),
+            "the winning value: {}",
+            notes[0]
+        );
+        assert!(
+            notes[0].contains("litrpg cast"),
+            "and how to actually change it"
+        );
+
+        // Both roles can diverge at once.
+        assert_eq!(config_cast_divergence(&cast, "azure:a", "azure:b").len(), 2);
+    }
+
+    #[test]
+    fn an_uncast_role_is_not_a_divergence() {
+        // Nothing established yet, so config is about to seed it — that is the design, not a clash.
+        assert!(config_cast_divergence(&[], "sherpa:cori:0", "sherpa:kokoro:24").is_empty());
+    }
+
+    #[test]
+    fn role_matching_is_case_insensitive() {
+        let cast = vec![("Narrator".to_string(), "sherpa:cori:0".to_string())];
+        assert_eq!(
+            config_cast_divergence(&cast, "azure:other", "unused").len(),
+            1,
+            "a case variant is the same role"
+        );
+    }
+
     #[test]
     fn a_cast_row_from_another_backend_is_substituted_not_fatal() {
         let mut planned = vec![

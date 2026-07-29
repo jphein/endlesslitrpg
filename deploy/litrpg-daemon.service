@@ -6,8 +6,15 @@
 #   curl -s http://localhost:8093/api/version | jq
 #
 # Plain HTTP, no TLS, no DNS — the ESP32-C6 watch supports none of those, so it
-# reaches this at a literal 10.0.6.107:8093. That address needs a pinned DHCP
-# lease; the watch cannot resolve a name if it drifts.
+# reaches this at a literal 10.0.6.129:8093, which is katana on the admin VLAN and
+# matches LITRPG_BASE_URL below. (The spec's §9.1 says 10.0.6.107/familiar, which is
+# where the daemon was *designed* to run per D4 — it is on katana today, and nothing
+# answers on .107.)
+#
+# That address still needs a pinned DHCP lease and does not have one: the interface
+# reports `10.0.6.129/24 dynamic`. The watch cannot resolve a name, so if the lease
+# moves, every client breaks with no error anywhere — the daemon keeps serving
+# happily on an address nobody is asking any more.
 
 [Unit]
 Description=endless-litrpg — HTTP surface

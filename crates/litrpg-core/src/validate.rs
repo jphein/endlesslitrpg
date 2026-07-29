@@ -117,10 +117,10 @@ pub fn validate_delta(
             if next < 0 {
                 return Err(Rejection::HpBelowZero);
             }
-            if let Some(max) = snap.num(&d.subject, "max_hp") {
-                if next > max {
-                    return Err(Rejection::HpAboveMax { max });
-                }
+            if let Some(max) = snap.num(&d.subject, "max_hp")
+                && next > max
+            {
+                return Err(Rejection::HpAboveMax { max });
             }
         }
         "level" if next < current => return Err(Rejection::LevelWouldDecrease),

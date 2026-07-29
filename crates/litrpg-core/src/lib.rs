@@ -12,6 +12,7 @@ pub mod artifact;
 pub mod hash;
 pub mod ledger;
 pub mod manifest;
+pub mod speaker;
 pub mod validate;
 pub mod voice;
 

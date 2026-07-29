@@ -3,15 +3,27 @@
 pub mod chapters;
 pub mod ledger;
 pub mod migrations;
-
-pub use ledger::{CastRow, NoteRow, REWOUND_REASON};
+pub mod story;
 
 pub use chapters::{ChapterRow, NewChapter};
+pub use ledger::{CastRow, NoteRow, REWOUND_REASON};
+pub use story::{NewStory, StoryRow};
+
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::Connection;
 use thiserror::Error;
 
 use migrations::{MIGRATIONS, TARGET_VERSION};
+
+/// Unix milliseconds. One definition, so every write path stamps time the same
+/// way and no caller gets to supply its own.
+pub(crate) fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -23,6 +35,8 @@ pub enum StoreError {
     ChapterNotFound(u32),
     #[error("chapter {number} manifest is invalid: {why}")]
     InvalidManifest { number: u32, why: &'static str },
+    #[error("no story row exists; run `litrpg init` first")]
+    NoStoryRow,
     #[error("delta rejected: {0}")]
     Rejected(String),
 }

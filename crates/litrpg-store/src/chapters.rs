@@ -1,18 +1,10 @@
 //! Chapter and segment persistence.
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use litrpg_core::manifest::{Manifest, Segment, SpeakerKind};
 use rusqlite::params;
 
-use crate::{Result, Store, StoreError};
+use crate::{Result, Store, StoreError, now_ms};
 
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
-}
 
 fn kind_str(k: SpeakerKind) -> &'static str {
     match k {

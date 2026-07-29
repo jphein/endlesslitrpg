@@ -1,20 +1,13 @@
 //! Ledger persistence: append-with-validation, snapshot, rewind.
 
 use std::collections::BTreeSet;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use litrpg_core::ledger::{LedgerEntry, Op, StateSnapshot, fold};
 use litrpg_core::validate::{Delta, Rejection, validate_delta};
 use rusqlite::params;
 
-use crate::{Result, Store};
+use crate::{Result, Store, now_ms};
 
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
-}
 
 fn op_str(op: Op) -> &'static str {
     match op {

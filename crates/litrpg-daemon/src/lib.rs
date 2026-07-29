@@ -3,6 +3,7 @@
 //! Plain HTTP, no TLS, no DNS — the ESP32-C6 watch can do none of those, so it
 //! reaches this daemon at a literal `10.0.6.107:8093`.
 
+pub mod access_log;
 pub mod chapters;
 pub mod config;
 pub mod datetime;
@@ -137,5 +138,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         // which is also where path traversal is rejected (see `media::parse_media_name`).
         .route("/media/{name}", get(media::serve_media))
         .route("/feed.xml", get(feed::get_feed))
+        // Applied after every route, so it wraps all of them — including `/media` and
+        // `/feed.xml`, which are the two the watch and a podcast app actually hit and so the
+        // two whose absence from a log would matter most. Placed outside `with_state` because
+        // it needs no state.
+        .layer(axum::middleware::from_fn(access_log::access_log))
         .with_state(state)
 }

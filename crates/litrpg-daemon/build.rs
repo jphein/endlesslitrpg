@@ -23,10 +23,13 @@ fn main() {
     // confidently reporting the wrong commit, which is worse than reporting `dev`.
     if let Some(git_dir) = find_git_dir() {
         println!("cargo:rerun-if-changed={}", git_dir.join("HEAD").display());
-        if let Ok(head) = std::fs::read_to_string(git_dir.join("HEAD")) {
-            if let Some(reference) = head.strip_prefix("ref: ").map(str::trim) {
-                println!("cargo:rerun-if-changed={}", git_dir.join(reference).display());
-            }
+        if let Ok(head) = std::fs::read_to_string(git_dir.join("HEAD"))
+            && let Some(reference) = head.strip_prefix("ref: ").map(str::trim)
+        {
+            println!(
+                "cargo:rerun-if-changed={}",
+                git_dir.join(reference).display()
+            );
         }
     }
 

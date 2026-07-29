@@ -94,6 +94,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let listener = tokio::net::TcpListener::bind(bind).await?;
-    axum::serve(listener, router(state)).await?;
+    // `into_make_service_with_connect_info` is what puts the peer address in each request's
+    // extensions — without it every access-log line would read `local` and the watch would be
+    // indistinguishable from Candela and from a curl on this box, which is most of the value
+    // of having the log at all.
+    axum::serve(
+        listener,
+        router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }

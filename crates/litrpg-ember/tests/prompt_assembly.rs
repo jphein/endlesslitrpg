@@ -359,6 +359,20 @@ fn pass1_teaches_the_exact_tag_format_the_parser_accepts() {
 /// pass 2 correctly proposed zero deltas and the ledger could never advance. A LitRPG with
 /// no RPG layer looks like a working pipeline — every stage reports success — while the
 /// numbers the whole design exists to keep consistent simply never appear.
+/// Measured from a real run: a 600-word chapter came back as **three segments** — two
+/// narration blocks and one `[SYSTEM]` block, no dialogue at all. So no character was cast,
+/// and every stat change pass 2 recorded against Kaelen and Sera was rejected as
+/// `UnknownSubject`. A multi-voice serial (D3) whose chapters have no voices is the whole
+/// design going unused, and nothing failed to say so.
+#[test]
+fn pass1_requires_at_least_one_character_to_speak() {
+    let text = pass1_text(&sample_input(&[], &[], &[]));
+    assert!(
+        text.contains("At least one character must speak"),
+        "a chapter of pure narration wastes the cast and blocks state changes"
+    );
+}
+
 #[test]
 fn pass1_requires_at_least_one_system_block() {
     let text = pass1_text(&sample_input(&[], &[], &[]));

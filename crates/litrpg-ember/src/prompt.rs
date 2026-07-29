@@ -252,6 +252,10 @@ explicit tag.
 blank line, repeat the tag — an untagged paragraph after a blank line is read as narration.
 - No markdown headings, no chapter number, no title, no commentary about the task, no \
 author's note.
+- At least one character must speak, with a [CharacterName] tag. Every character is cast \
+with their own voice, so a chapter of pure narration throws that away — and a character who \
+never speaks has no cast entry, which means the engine rejects any stat change recorded \
+against them.
 - Every chapter must contain at least one [SYSTEM] block carrying concrete numbers — \
 experience gained, hit points lost, gold or loot received, a level-up, or a quest \
 advancing. This is a LitRPG: without it the chapter has no RPG layer and the story's \

@@ -7,6 +7,7 @@ members = [
     "crates/litrpg-daemon",
     "crates/litrpg-config",
     "crates/litrpg-cli",
+    "crates/litrpg-engine",
 ]
 resolver = "3"
 
@@ -53,3 +54,7 @@ toml = "1.1.4"
 anyhow = "1.0.104"
 dirs = "6.0.0"
 tempfile = "3.27.0"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+litrpg-engine = { path = "crates/litrpg-engine" }

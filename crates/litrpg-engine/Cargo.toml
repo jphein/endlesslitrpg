@@ -1,0 +1,23 @@
+[package]
+name = "litrpg-engine"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "The chapter loop: schedule, generate, validate, render, publish"
+
+[dependencies]
+litrpg-core = { workspace = true }
+litrpg-store = { workspace = true }
+litrpg-ember = { workspace = true }
+litrpg-tts = { workspace = true }
+litrpg-config = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true, features = ["std"] }
+serde_json = { workspace = true, features = ["std"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tempfile = { workspace = true }

@@ -452,11 +452,15 @@ fn the_default_target_word_count_matches_the_spec() {
 #[test]
 fn pass2_includes_the_chapter_text_and_the_known_subjects() {
     let subjects = ["Kaelen".to_string(), "Sera".to_string()];
-    let text = pass2_messages("Kaelen broke the first seal.", &subjects)
-        .iter()
-        .map(|m| m.content.clone())
-        .collect::<Vec<_>>()
-        .join("\n");
+    let text = pass2_messages(
+        "Kaelen broke the first seal.",
+        &subjects,
+        &["Kaelen".to_string()],
+    )
+    .iter()
+    .map(|m| m.content.clone())
+    .collect::<Vec<_>>()
+    .join("\n");
 
     assert!(text.contains("Kaelen broke the first seal."));
     assert!(text.contains("Sera"));
@@ -466,7 +470,7 @@ fn pass2_includes_the_chapter_text_and_the_known_subjects() {
 fn pass2_lists_the_whitelists_straight_from_litrpg_core() {
     // Building the prompt from the gate's own constants is what stops the prompt and
     // the validator drifting apart (spec §6.2 / §9.4.1).
-    let text = pass2_messages("body", &[])
+    let text = pass2_messages("body", &[], &[])
         .iter()
         .map(|m| m.content.clone())
         .collect::<Vec<_>>()
@@ -505,7 +509,7 @@ fn pass2_lists_the_whitelists_straight_from_litrpg_core() {
 /// of a chapter (§6.3), so it has to be asked for as plainly as the title.
 #[test]
 fn pass2_asks_for_the_summary_as_explicitly_as_the_title() {
-    let text = pass2_messages("body", &[])
+    let text = pass2_messages("body", &[], &[])
         .iter()
         .map(|m| m.content.clone())
         .collect::<Vec<_>>()
@@ -533,9 +537,49 @@ fn pass2_asks_for_the_summary_as_explicitly_as_the_title() {
     );
 }
 
+/// The list is supplied, not requested — see `pass2_messages`' docs for why.
+#[test]
+fn pass2_names_the_speakers_rather_than_asking_for_them() {
+    let text = pass2_messages(
+        "body",
+        &["Kaelen".to_string()],
+        &["Kaelen".to_string(), "Sera".to_string()],
+    )
+    .iter()
+    .map(|m| m.content.clone())
+    .collect::<Vec<_>>()
+    .join("\n");
+
+    assert!(
+        text.contains("Kaelen, Sera"),
+        "the parsed list must appear verbatim: {text}"
+    );
+    assert!(
+        text.contains("Do not add or omit names"),
+        "and be stated as the parse rather than a suggestion"
+    );
+    assert!(
+        text.contains("omit \n         `gender`") || text.contains("omit `gender`"),
+        "while gender stays optional, because guessing it is worse than leaving it out"
+    );
+}
+
+#[test]
+fn pass2_handles_a_chapter_with_no_dialogue() {
+    let text = pass2_messages("body", &[], &[])
+        .iter()
+        .map(|m| m.content.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        text.contains("no dialogue"),
+        "say so rather than leaving a blank list: {text}"
+    );
+}
+
 #[test]
 fn pass2_warns_against_inventing_subjects() {
-    let text = pass2_messages("body", &["Kaelen".to_string()])
+    let text = pass2_messages("body", &["Kaelen".to_string()], &["Kaelen".to_string()])
         .iter()
         .map(|m| m.content.clone())
         .collect::<Vec<_>>()

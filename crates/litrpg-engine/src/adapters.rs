@@ -72,8 +72,9 @@ impl Generator for EmberGenerator {
         &self,
         chapter_text: &str,
         known_subjects: &[String],
+        speakers: &[String],
     ) -> Result<Extraction, EmberError> {
-        let spec = ChatSpec::new(pass2_messages(chapter_text, known_subjects))
+        let spec = ChatSpec::new(pass2_messages(chapter_text, known_subjects, speakers))
             .temperature(0.0)
             .max_tokens(PASS2_MAX_TOKENS)
             .response_format(response_format());

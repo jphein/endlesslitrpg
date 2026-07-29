@@ -591,6 +591,52 @@ async fn a_speakers_gender_hint_re_casts_without_any_new_lore() {
     }
 }
 
+/// The fix for #6: the engine has already parsed who spoke, so pass 2 is **told** the list rather
+/// than asked for it. Measured live, asking produced a gender for `Sera` and silently omitted
+/// `Kaelen` and `Shadow`, so two of three characters kept a round-robin voice.
+#[tokio::test]
+async fn pass_2_is_told_which_characters_spoke() {
+    let prose = "\
+[narrator] The vale was quiet.
+
+[Kaelen] \"One.\"
+
+[Sera] \"Two.\"
+
+[SYSTEM] XP gained: 10.";
+
+    let e = engine(
+        FakeGenerator::new().with_prose(prose),
+        FakeRenderer::new(),
+        FakeLibrary::new(),
+        FakeArtifacts::new(),
+    );
+    e.run_cycle(BufferCursor::At(0)).await.unwrap();
+
+    let told = e.generator().last_pass2_speakers();
+    assert_eq!(
+        told,
+        vec!["Kaelen".to_string(), "Sera".to_string()],
+        "every character who spoke, in first-appearance order"
+    );
+    assert!(
+        !told.iter().any(|s| litrpg_core::speaker::is_reserved(s)),
+        "narrator and SYSTEM are voices, not characters: {told:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_chapter_with_no_dialogue_tells_pass_2_an_empty_list() {
+    let e = engine(
+        FakeGenerator::new().with_prose("[narrator] Nothing was said."),
+        FakeRenderer::new(),
+        FakeLibrary::new(),
+        FakeArtifacts::new(),
+    );
+    e.run_cycle(BufferCursor::At(0)).await.unwrap();
+    assert!(e.generator().last_pass2_speakers().is_empty());
+}
+
 #[tokio::test]
 async fn a_speaker_without_a_gender_is_left_alone() {
     let e = gendered_engine(

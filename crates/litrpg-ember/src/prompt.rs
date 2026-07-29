@@ -352,9 +352,25 @@ Writing them is not inventing anything: the chapter is in front of you.";
 /// Assemble the extraction pass. Pair with [`crate::extract::response_format`] and
 /// temperature 0.
 ///
+/// # `speakers` is told, not asked
+///
+/// The engine has already parsed the chapter, so it knows exactly who spoke. Asking the model to
+/// enumerate them invites omission, and measured live it did: pass 2 returned a gender for `Sera`
+/// and silently left out `Kaelen` and `Shadow`, so two of three characters kept a round-robin voice
+/// and all three ended up female-presenting. The instruction to "list every speaker, including the
+/// protagonist" was already there and did not help.
+///
+/// So the list is supplied and the model is asked only for the one thing it alone knows — the
+/// gender the prose implies. Same division as everywhere else: the engine owns what is derivable,
+/// the model supplies judgement.
+///
 /// The legal field list is generated from `litrpg_core`'s own whitelists, so the prompt
 /// and the validation gate cannot drift apart (§6.2).
-pub fn pass2_messages(chapter_text: &str, known_subjects: &[String]) -> Vec<Message> {
+pub fn pass2_messages(
+    chapter_text: &str,
+    known_subjects: &[String],
+    speakers: &[String],
+) -> Vec<Message> {
     let subjects = if known_subjects.is_empty() {
         "(none yet — this is the opening chapter, so every subject is new)".to_string()
     } else {
@@ -376,10 +392,11 @@ pub fn pass2_messages(chapter_text: &str, known_subjects: &[String]) -> Vec<Mess
          Report a delta only for a change the chapter actually states. A field outside \
          this list, or a subject that is not a real character, is rejected by the engine \
          and the change is lost — so do not invent either.\n\n\
-         List every speaker in `speakers`, including the protagonist, with a `gender` where the \
-         chapter makes it clear. This is reporting who spoke, not inventing anything. The engine \
-         casts a voice from it and a voice once assigned is permanent, so omit `gender` rather \
-         than guess. Never list `narrator` or `SYSTEM` — they are voices, not people.\n\n\
+         These characters speak in this chapter: {speaker_list}\n\
+         Return one `speakers` entry for **each** of them, with a `gender` where the chapter makes \
+         it clear. Do not add or omit names — the list is not a suggestion, it is the parse. The \
+         engine casts a voice from the gender and a voice once assigned is permanent, so omit \
+         `gender` for a character whose gender the chapter does not settle, rather than guessing.\n\n\
          Add a `new_lore` entry for every character who appears here for the first time, with \
          `kind` = character and their `gender` — the engine casts a voice from it, and a voice \
          once assigned is permanent. Omit `gender` rather than guessing.\n\n\
@@ -401,6 +418,11 @@ pub fn pass2_messages(chapter_text: &str, known_subjects: &[String]) -> Vec<Mess
         slots = EQUIP_SLOTS.join(", "),
         appear = APPEAR_PREFIX,
         traits = APPEAR_TRAITS.join(", "),
+        speaker_list = if speakers.is_empty() {
+            "(none — this chapter has no dialogue)".to_string()
+        } else {
+            speakers.join(", ")
+        },
     );
 
     vec![Message::system(PASS2_SYSTEM), Message::user(user)]

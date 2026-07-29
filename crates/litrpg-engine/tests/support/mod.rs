@@ -32,6 +32,8 @@ pub struct FakeGenerator {
     pub pass1_calls: Mutex<Vec<(String, f64)>>,
     /// (chapter text, known subjects) for every pass-2 call.
     pub pass2_calls: Mutex<Vec<(String, Vec<String>)>>,
+    /// The parsed speaker list handed to each pass-2 call.
+    pub pass2_speakers: Mutex<Vec<Vec<String>>>,
 }
 
 pub const DEFAULT_PROSE: &str = "\
@@ -50,6 +52,7 @@ impl FakeGenerator {
             pass2_default: Mutex::new(Some(extraction_with(vec![], vec![]))),
             pass1_calls: Mutex::new(Vec::new()),
             pass2_calls: Mutex::new(Vec::new()),
+            pass2_speakers: Mutex::new(Vec::new()),
         }
     }
 
@@ -85,6 +88,16 @@ impl FakeGenerator {
 
     pub fn pass2_count(&self) -> usize {
         self.pass2_calls.lock().unwrap().len()
+    }
+
+    /// The parsed speaker list pass 2 was told about, from the most recent call.
+    pub fn last_pass2_speakers(&self) -> Vec<String> {
+        self.pass2_speakers
+            .lock()
+            .unwrap()
+            .last()
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Every pass-1 prompt, concatenated.
@@ -137,7 +150,9 @@ impl Generator for FakeGenerator {
         &self,
         chapter_text: &str,
         known_subjects: &[String],
+        speakers: &[String],
     ) -> Result<Extraction, EmberError> {
+        self.pass2_speakers.lock().unwrap().push(speakers.to_vec());
         self.pass2_calls
             .lock()
             .unwrap()

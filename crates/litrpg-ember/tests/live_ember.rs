@@ -151,10 +151,14 @@ async fn pass_2_extraction_round_trips_against_the_live_model() {
                    dead god's ledger credited him one hundred and fifty experience. Sera \
                    watched from the altar in the Ashen Vale and said nothing.";
 
-    let spec = ChatSpec::new(pass2_messages(chapter, &subjects))
-        .temperature(0.0)
-        .max_tokens(2000)
-        .response_format(response_format());
+    let spec = ChatSpec::new(pass2_messages(
+        chapter,
+        &subjects,
+        &["Kaelen".to_string(), "Sera".to_string()],
+    ))
+    .temperature(0.0)
+    .max_tokens(2000)
+    .response_format(response_format());
 
     let out = client().chat(&spec).await.expect("pass 2 call");
     eprintln!("pass 2 raw output:\n{}", out.content);

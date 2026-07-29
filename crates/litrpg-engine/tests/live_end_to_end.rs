@@ -276,8 +276,16 @@ async fn one_real_chapter_end_to_end() {
             .collect();
         // Same input the cycle used: tags stripped. Feeding the tagged markdown makes
         // pass 2 treat `SYSTEM` as a character and propose `subject=SYSTEM`.
-        let plain = litrpg_engine::plain_chapter_text(&planned_from(&row.text_md));
-        match litrpg_engine::Generator::pass2(&diag, &plain, &known).await {
+        let replanned = planned_from(&row.text_md);
+        let plain = litrpg_engine::plain_chapter_text(&replanned);
+        // The parsed speaker list, told to pass 2 rather than asked for.
+        let spoken: Vec<String> =
+            litrpg_engine::distinct_speakers(&litrpg_ember::parse_tagged_prose(&row.text_md))
+                .into_iter()
+                .filter(|s| s.kind == litrpg_core::SpeakerKind::Character)
+                .map(|s| s.speaker)
+                .collect();
+        match litrpg_engine::Generator::pass2(&diag, &plain, &known, &spoken).await {
             Ok(e) => {
                 eprintln!("--- pass 2 proposed {} deltas:", e.deltas.len());
                 for d in &e.deltas {

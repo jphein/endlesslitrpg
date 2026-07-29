@@ -517,7 +517,13 @@ where
             // here. The stats guard below asks `kind` instead.
             .filter(|s| !speaker::is_reserved(s))
             .collect();
-        let extraction = self.pass2(&plain_text, &known).await;
+        // The characters the parse found — told to pass 2 rather than asked for.
+        let spoken: Vec<String> = speakers
+            .iter()
+            .filter(|s| s.kind == SpeakerKind::Character)
+            .map(|s| s.speaker.clone())
+            .collect();
+        let extraction = self.pass2(&plain_text, &known, &spoken).await;
         let state_dirty = extraction.is_none();
         if state_dirty {
             warn!(
@@ -627,6 +633,21 @@ where
                     wanted.insert(canon(&l.name).to_lowercase(), g.to_string());
                 }
             }
+            // Visible rather than silent: a character the parse found but the model did not gender
+            // keeps a round-robin voice, which is how all three live characters ended up
+            // female-presenting with nothing reporting it.
+            let ungendered: Vec<&String> = spoken
+                .iter()
+                .filter(|name| !wanted.contains_key(&name.trim().to_lowercase()))
+                .collect();
+            if !ungendered.is_empty() {
+                warn!(
+                    ?ungendered,
+                    "pass 2 returned no gender for these speakers; they keep a round-robin voice, \
+                     which is permanent once cast"
+                );
+            }
+
             if !wanted.is_empty() && !new_cast.is_empty() {
                 let all_voices: Vec<String> = existing_cast
                     .iter()
@@ -803,10 +824,15 @@ where
     }
 
     /// Pass 2 with jittered retries. `None` means the chapter ships `state_dirty`.
-    async fn pass2(&self, chapter_text: &str, known: &[String]) -> Option<Extraction> {
+    async fn pass2(
+        &self,
+        chapter_text: &str,
+        known: &[String],
+        speakers: &[String],
+    ) -> Option<Extraction> {
         for (attempt, temp) in PASS2_TEMPERATURES.iter().enumerate() {
             debug!(attempt, temperature = temp, "extraction attempt");
-            match self.generator.pass2(chapter_text, known).await {
+            match self.generator.pass2(chapter_text, known, speakers).await {
                 Ok(e) => return Some(e),
                 Err(e) => {
                     if e.is_transport() || !e.is_retryable() {

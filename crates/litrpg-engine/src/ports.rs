@@ -53,10 +53,15 @@ pub trait Generator: Send + Sync {
     async fn pass1(&self, input: &Pass1Input<'_>, temperature: f64) -> Result<String, EmberError>;
 
     /// The extraction pass, schema-constrained, temperature 0.
+    ///
+    /// `speakers` is the **parsed** speaker list, supplied rather than requested: the engine already
+    /// knows who spoke, and asking the model to enumerate them invites the omission that left two
+    /// of three live characters without a gender hint.
     async fn pass2(
         &self,
         chapter_text: &str,
         known_subjects: &[String],
+        speakers: &[String],
     ) -> Result<Extraction, EmberError>;
 }
 

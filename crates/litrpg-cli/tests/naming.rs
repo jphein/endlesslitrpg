@@ -239,3 +239,105 @@ fn the_pair_is_ordered_shortest_first() {
         assert_eq!(possible_aliases(&input)[0].0, "Kaelen");
     }
 }
+
+// ------------------------------ protagonist vs cast: the chapter-1 signal
+
+use litrpg_cli::naming::{ProtagonistCast, cast_warning, check_protagonist_cast};
+
+fn cast_of(names: &[&str]) -> Vec<String> {
+    names.iter().map(|s| s.to_string()).collect()
+}
+
+#[test]
+fn a_protagonist_in_the_cast_is_silent() {
+    let c = check_protagonist_cast(
+        "Kaelen Vord",
+        &cast_of(&["narrator", "Kaelen Vord", "Sera"]),
+    );
+    assert_eq!(
+        c,
+        ProtagonistCast::Cast {
+            speaker: "Kaelen Vord".into()
+        }
+    );
+    assert!(!c.is_warning());
+    assert_eq!(cast_warning(&c, "Kaelen Vord"), None);
+}
+
+#[test]
+fn the_live_mismatch_is_caught() {
+    // protagonist "Kaelen Vord" against a cast row of "Kaelen" — true from the moment `init`
+    // ran, before a single delta existed.
+    let c = check_protagonist_cast("Kaelen Vord", &cast_of(&["narrator", "SYSTEM", "Kaelen"]));
+    assert_eq!(
+        c,
+        ProtagonistCast::Missing {
+            cast: cast_of(&["Kaelen"])
+        }
+    );
+    assert!(c.is_warning());
+
+    let w = cast_warning(&c, "Kaelen Vord").expect("should warn");
+    assert!(w.contains("not in the cast"), "{w}");
+    assert!(
+        w.contains("\"Kaelen\""),
+        "must name what the cast does hold:\n{w}"
+    );
+    assert!(
+        w.contains("splits in two"),
+        "must say the consequence:\n{w}"
+    );
+    assert!(
+        w.contains("append-only"),
+        "must say it cannot be merged after:\n{w}"
+    );
+    assert!(w.contains("alias"), "must name the remedy:\n{w}");
+}
+
+#[test]
+fn matching_is_by_identity_not_by_bytes() {
+    // Case and internal whitespace must not read as a mismatch — that would be rule eight.
+    for spelling in ["kaelen vord", "KAELEN VORD", "  Kaelen   Vord  "] {
+        let c = check_protagonist_cast(spelling, &cast_of(&["Kaelen Vord"]));
+        assert!(!c.is_warning(), "{spelling:?} should match: {c:?}");
+    }
+}
+
+#[test]
+fn reserved_roles_do_not_count_as_the_cast() {
+    // A story whose only cast rows are narrator and SYSTEM has no people yet; reporting a
+    // mismatch against roles would fire on every fresh story.
+    let c = check_protagonist_cast("Kaelen", &cast_of(&["narrator", "SYSTEM"]));
+    assert_eq!(c, ProtagonistCast::CastEmpty);
+    assert!(!c.is_warning());
+}
+
+#[test]
+fn an_empty_cast_is_not_a_mismatch() {
+    let c = check_protagonist_cast("Kaelen", &[]);
+    assert_eq!(c, ProtagonistCast::CastEmpty);
+    assert!(!c.is_warning());
+}
+
+#[test]
+fn an_unset_protagonist_is_not_checked_against_the_cast() {
+    for empty in ["", "   "] {
+        assert_eq!(
+            check_protagonist_cast(empty, &cast_of(&["Kaelen"])),
+            ProtagonistCast::Unset
+        );
+    }
+}
+
+#[test]
+fn the_warning_lists_only_people_not_roles() {
+    let c = check_protagonist_cast("Aster", &cast_of(&["narrator", "SYSTEM", "Kaelen", "Sera"]));
+    match &c {
+        ProtagonistCast::Missing { cast } => {
+            assert_eq!(cast, &cast_of(&["Kaelen", "Sera"]), "{cast:?}");
+        }
+        other => panic!("expected Missing, got {other:?}"),
+    }
+    let w = cast_warning(&c, "Aster").unwrap();
+    assert!(!w.contains("narrator"), "roles are noise here:\n{w}");
+}

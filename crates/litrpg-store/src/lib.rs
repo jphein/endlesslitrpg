@@ -60,12 +60,12 @@ pub enum StoreError {
     /// A reserved role given a kind that would make it a person, or a person given a kind
     /// that would stop them being one.
     #[error(
-        "{speaker:?} is a reserved role and cannot have kind {kind:?} — `kind` is the only          authority on whether a row can hold stats, so this would have made a voice into a          character"
+        "{speaker:?} is a reserved role, so it cannot have kind {kind:?}: that would let a voice accrue stats"
     )]
     ReservedKindMismatch { speaker: String, kind: String },
 
     #[error(
-        "{speaker:?} is a character and cannot have kind {kind:?} — that kind marks a row as          not-a-person, so their stat changes would stop being accepted"
+        "{speaker:?} is a character, so it cannot have kind {kind:?}: that would stop their stat changes being accepted"
     )]
     PersonGivenRoleKind { speaker: String, kind: String },
 

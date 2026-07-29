@@ -491,3 +491,36 @@ fn reclassifying_finds_the_row_by_identity_not_by_spelling() {
     s.set_cast_kind("  sYsTeM  ", "narrator").unwrap();
     assert_eq!(s.cast().unwrap()[0].kind, "narrator");
 }
+
+#[test]
+fn the_guard_messages_read_as_sentences() {
+    // Found by running the binary: `cargo fmt` joined a line-continued string literal and baked
+    // the indentation in, so the message read "`kind` is the only          authority on…".
+    // Every assertion passed — they use `matches!` on the variant, which cannot see the words.
+    // A formatter introducing an output defect is a new door onto §5.5, so this closes it by
+    // asserting the shape of the prose rather than only the type.
+    let s = store();
+    let a = s
+        .upsert_cast("SYSTEM", "sherpa:a:0", "character", 1)
+        .unwrap_err()
+        .to_string();
+    let b = s
+        .upsert_cast("Kaelen", "sherpa:a:0", "narrator", 1)
+        .unwrap_err()
+        .to_string();
+
+    for msg in [&a, &b] {
+        assert!(
+            !msg.contains("  "),
+            "run of spaces from a joined line continuation:\n{msg}"
+        );
+        assert_eq!(msg.lines().count(), 1, "should be one line:\n{msg}");
+        assert!(
+            msg.len() < 140,
+            "too long to read at a prompt: {}",
+            msg.len()
+        );
+    }
+    assert!(a.contains("accrue stats"), "{a}");
+    assert!(b.contains("stop their stat changes"), "{b}");
+}

@@ -303,3 +303,104 @@ fn the_report_serialises() {
     assert!(json.contains("protagonist_check"), "{json}");
     assert!(json.contains("consumed_through"), "{json}");
 }
+
+// ------------------- the chapter-1 signal, and its own fix silencing it
+
+#[test]
+fn a_protagonist_who_is_not_in_the_cast_is_flagged() {
+    // The live shape, at chapter 1: nothing has split yet, and this is already true.
+    let dir = tmp();
+    let s = seeded(dir.path(), "Kaelen Vord", "Kaelen Vord");
+    s.upsert_cast("Kaelen", "sherpa:a:0", "character", 1)
+        .unwrap();
+
+    let r = story::story(&s, &StoryEdit::default(), dir.path()).unwrap();
+    assert!(r.protagonist_cast.is_warning(), "{:?}", r.protagonist_cast);
+    let out = story::render_text(&r);
+    assert!(out.contains("not in the cast"), "{out}");
+    assert!(out.contains("splits in two"), "{out}");
+}
+
+#[test]
+fn the_alias_that_fixes_it_also_silences_it() {
+    // The refinement that matters: JP chose the alias mapping as the fix, so a warning that
+    // survived it would be one people learn to ignore.
+    let dir = tmp();
+    let s = seeded(dir.path(), "Kaelen Vord", "Kaelen Vord");
+    s.upsert_cast("Kaelen", "sherpa:a:0", "character", 1)
+        .unwrap();
+    assert!(
+        story::story(&s, &StoryEdit::default(), dir.path())
+            .unwrap()
+            .protagonist_cast
+            .is_warning()
+    );
+
+    s.add_alias("Kaelen", "Kaelen Vord").unwrap();
+
+    let r = story::story(&s, &StoryEdit::default(), dir.path()).unwrap();
+    assert!(
+        !r.protagonist_cast.is_warning(),
+        "the alias is the fix, so this must go quiet: {:?}",
+        r.protagonist_cast
+    );
+    assert!(!story::render_text(&r).contains("not in the cast"));
+}
+
+#[test]
+fn renaming_the_protagonist_to_the_cast_name_also_silences_it() {
+    // The other legitimate fix: make the two the same name.
+    let dir = tmp();
+    let s = seeded(dir.path(), "Kaelen Vord", "Kaelen");
+    s.upsert_cast("Kaelen", "sherpa:a:0", "character", 1)
+        .unwrap();
+    assert!(
+        story::story(&s, &StoryEdit::default(), dir.path())
+            .unwrap()
+            .protagonist_cast
+            .is_warning()
+    );
+
+    let r = story::story(&s, &edit_protagonist("Kaelen"), dir.path()).unwrap();
+    assert!(!r.protagonist_cast.is_warning(), "{:?}", r.protagonist_cast);
+}
+
+#[test]
+fn changing_the_protagonist_away_from_the_cast_reports_it_at_once() {
+    // A command that can *create* the mismatch should say so rather than leaving it for the
+    // next `status`.
+    let dir = tmp();
+    let s = seeded(dir.path(), "Kaelen", "Kaelen");
+    s.upsert_cast("Kaelen", "sherpa:a:0", "character", 1)
+        .unwrap();
+    assert!(
+        !story::story(&s, &StoryEdit::default(), dir.path())
+            .unwrap()
+            .protagonist_cast
+            .is_warning()
+    );
+
+    let r = story::story(&s, &edit_protagonist("Aster"), dir.path()).unwrap();
+    assert!(r.protagonist_cast.is_warning(), "{:?}", r.protagonist_cast);
+    assert!(story::render_text(&r).contains("not in the cast"));
+}
+
+#[test]
+fn a_fresh_story_with_no_cast_is_not_nagged() {
+    let dir = tmp();
+    let s = seeded(dir.path(), "Kaelen", "Kaelen");
+    let r = story::story(&s, &StoryEdit::default(), dir.path()).unwrap();
+    assert!(!r.protagonist_cast.is_warning(), "{:?}", r.protagonist_cast);
+}
+
+#[test]
+fn the_cast_check_is_in_the_json() {
+    let dir = tmp();
+    let s = seeded(dir.path(), "Kaelen Vord", "Kaelen Vord");
+    s.upsert_cast("Kaelen", "sherpa:a:0", "character", 1)
+        .unwrap();
+    let json = serde_json::to_string(&story::story(&s, &StoryEdit::default(), dir.path()).unwrap())
+        .unwrap();
+    assert!(json.contains("protagonist_cast"), "{json}");
+    assert!(json.contains("\"result\":\"missing\""), "{json}");
+}

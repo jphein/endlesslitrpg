@@ -61,7 +61,7 @@ pub mod registry;
 pub mod resample;
 pub mod sherpa;
 
-pub use azure::VoicePreflight;
+pub use azure::{RenderPart, VoicePreflight};
 pub use backend::{Availability, CostClass, Gender, RenderRequest, TtsBackend, VoiceDesc};
 pub use error::{Result, TtsError};
 pub use pcm::{Assembly, DEFAULT_GAP_MS, Pcm16k, PcmError, Span, assemble};

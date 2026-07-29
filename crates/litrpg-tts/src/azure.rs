@@ -589,6 +589,26 @@ const FALLBACK_BY_LOCALE: &[(&str, Gender, &str)] = &[
     ("en-US", Gender::Male, "en-US-Andrew:DragonHDLatestNeural"),
 ];
 
+/// One HTTP request's worth of a segment, from [`AzureBackend::render_parts`].
+#[derive(Debug, Clone)]
+pub struct RenderPart {
+    /// Characters of text this request carried.
+    pub chars: usize,
+    pub pcm: Pcm16k,
+    /// Wall time for this request alone.
+    pub wall: Duration,
+    /// The timeout this request was given.
+    pub budget: Duration,
+}
+
+impl RenderPart {
+    /// Fraction of the timeout budget actually consumed. Well under 1.0 means the
+    /// budget is doing its job as a ceiling rather than a wait.
+    pub fn budget_used(&self) -> f64 {
+        self.wall.as_secs_f64() / self.budget.as_secs_f64()
+    }
+}
+
 /// The verdict of an Azure-side cast preflight.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VoicePreflight {
@@ -736,6 +756,35 @@ impl AzureBackend {
 
     pub fn config(&self) -> &AzureConfig {
         &self.config
+    }
+
+    /// **Diagnostic only.** Render a segment and return **one buffer per HTTP
+    /// request**, with each request's wall time and its own timeout budget.
+    ///
+    /// Exists because a long segment is split into several requests and concatenated
+    /// (see [`split_for_requests`]), which creates a *chunk join* — a seam that
+    /// per-segment measurement cannot see. This is the only way to measure what
+    /// happens at those seams: whether the requests land at consistent loudness, and
+    /// how much timeout headroom each one actually had.
+    ///
+    /// Not used by the render path; `render_one` concatenates internally.
+    pub async fn render_parts(&self, req: &RenderRequest) -> Result<Vec<RenderPart>> {
+        AzureConfig::validate_voice_name(&req.voice.remainder)?;
+        let mut out = Vec::new();
+        for part in split_for_requests(&req.text, self.max_chars_per_request) {
+            let chars = part.chars().count();
+            let mut sub = req.clone();
+            sub.text = part;
+            let started = std::time::Instant::now();
+            let pcm = self.render_attempt(&sub).await?;
+            out.push(RenderPart {
+                chars,
+                pcm,
+                wall: started.elapsed(),
+                budget: timeout_for_chars(chars),
+            });
+        }
+        Ok(out)
     }
 
     /// Whether a rejected voice falls back to a substitute. Off unless opted in.

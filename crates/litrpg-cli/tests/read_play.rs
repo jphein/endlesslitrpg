@@ -1136,3 +1136,61 @@ fn read_no_longer_exposes_media_paths() {
     assert!(json.contains("\"number\":1"), "{json}");
     assert!(json.contains("has_audio"), "{json}");
 }
+
+#[test]
+fn the_rendered_speaker_kind_matches_cores_canonical_form() {
+    // Fifth instance of the recurring pattern, found by grepping for who else wrote
+    // this string: `SpeakerKind` -> string is hand-rolled in four places
+    // (litrpg-store's `kind_str`, litrpg-engine's `cycle.rs`, litrpg-ember's
+    // `parse.rs`, and `read.rs` here) while `litrpg-core` already owns a canonical
+    // form via `#[serde(rename_all = "lowercase")]`. All four agree today; nothing
+    // makes them.
+    //
+    // It matters more than the filename convention did, because the same value takes
+    // three representations of one fact: serde's (inside `manifest_json` and the
+    // daemon's API), the store's (the `segments.kind` column), and this one. A drift
+    // would make the manifest and the segments table disagree about a speaker's kind
+    // — and kind selects the voice (narrator, system and character are voiced
+    // differently), so the symptom is a mis-voiced chapter that only a listener
+    // notices.
+    //
+    // Compared against core rather than a local literal, so the two sides can
+    // actually disagree — otherwise the test only proves the literal.
+    let dir = tmp();
+    let s = store();
+    chapter(&s, 1, "text");
+    attach(
+        &s,
+        dir.path(),
+        1,
+        vec![
+            seg(0, "narrator", SpeakerKind::Narrator, "sherpa:x:0", 0, 100),
+            seg(1, "Kaelen", SpeakerKind::Character, "sherpa:y:0", 100, 200),
+            seg(2, "SYSTEM", SpeakerKind::System, "sherpa:z:0", 200, 300),
+        ],
+    );
+
+    let view = read::read(&s, Some(1)).unwrap();
+    for sv in &view.segments {
+        // Round-trip through the database preserved the kind, and what the CLI prints
+        // is byte-identical to what core serializes.
+        let canonical = serde_json::to_string(&match sv.kind {
+            "narrator" => SpeakerKind::Narrator,
+            "character" => SpeakerKind::Character,
+            "system" => SpeakerKind::System,
+            other => panic!("unrecognised kind {other:?}"),
+        })
+        .unwrap();
+        assert_eq!(
+            canonical,
+            format!("\"{}\"", sv.kind),
+            "segment {} disagrees with core's serde form",
+            sv.idx
+        );
+    }
+    assert_eq!(
+        view.segments.iter().map(|s| s.kind).collect::<Vec<_>>(),
+        vec!["narrator", "character", "system"],
+        "kinds must survive the store round-trip in order"
+    );
+}

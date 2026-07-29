@@ -455,3 +455,243 @@ async fn render_joined_chunks_across_multiple_requests() {
         "chunked total diverges from single-request total: {ratio:.2}x"
     );
 }
+
+/// Integrated loudness (LUFS) of a 16 kHz PCM buffer via ffmpeg's `ebur128`.
+/// `-v error` would suppress the summary (it logs at INFO), so verbosity is deliberate.
+fn lufs(pcm: &Pcm16k, tag: &str) -> Option<f64> {
+    let path = std::env::temp_dir().join(format!("litrpg-az-{tag}.pcm"));
+    std::fs::write(&path, pcm.as_bytes()).ok()?;
+    let out = std::process::Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-nostats",
+            "-f",
+            "s16le",
+            "-ar",
+            "16000",
+            "-ac",
+            "1",
+            "-i",
+        ])
+        .arg(&path)
+        .args(["-af", "ebur128", "-f", "null", "-"])
+        .output()
+        .ok()?;
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    let _ = std::fs::remove_file(&path);
+    let i = err.rfind("Integrated loudness")?;
+    err[i..]
+        .lines()
+        .find(|l| l.trim_start().starts_with("I:"))?
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()
+}
+
+/// **Closes issue #2.** One full-length chapter, with the per-request breakdown the
+/// chunking design needs in order to be believed:
+///
+/// - every request's wall time against **its own** `timeout_for_chars` budget;
+/// - how many requests the chapter costs, and which segments got split;
+/// - **loudness across chunk joins** — a seam that did not exist when the 0.7 LU
+///   per-segment spread was measured, and which the Azure path does *not* normalize
+///   (Azure is 16 kHz native, so `FfmpegPostProcessor` never runs on it);
+/// - the byte invariant, and manifest offsets byte-matching their sources.
+///
+/// ⚠️ ~8 200 chars of DragonHD quota. Run after changing chunking, splitting or
+/// timeouts — not routinely.
+#[tokio::test]
+#[ignore = "spends ~8200 chars of Azure quota; the full-length chunking report"]
+async fn full_length_chapter_chunk_report() {
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../media/0001.json")
+        .canonicalize()
+        .expect("media/0001.json — run a chapter first");
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&manifest).unwrap()).unwrap();
+    let segs = json["segments"].as_array().unwrap();
+
+    let reqs: Vec<RenderRequest> = segs
+        .iter()
+        .map(|s| {
+            let kind = match s["kind"].as_str().unwrap() {
+                "system" => SpeakerKind::System,
+                "character" => SpeakerKind::Character,
+                _ => SpeakerKind::Narrator,
+            };
+            let voice = match kind {
+                SpeakerKind::System => "azure:en-US-Steffan:DragonHDLatestNeural",
+                _ => "azure:en-GB-Ada:DragonHDLatestNeural",
+            };
+            req(
+                s["idx"].as_u64().unwrap() as u32,
+                voice,
+                s["text"].as_str().unwrap(),
+                kind,
+            )
+        })
+        .collect();
+
+    let b = backend();
+    let budget = b.max_chars_per_request();
+    eprintln!(
+        "\n=== full chapter: {} segments, {} chars, request budget {budget} chars ===",
+        reqs.len(),
+        reqs.iter().map(|r| r.text.chars().count()).sum::<usize>()
+    );
+
+    // Sequential on purpose: this measures each request's own cost, so concurrency
+    // must not muddy the timings.
+    let started = std::time::Instant::now();
+    let mut per_segment: Vec<Vec<litrpg_tts::RenderPart>> = Vec::new();
+    for r in &reqs {
+        per_segment.push(b.render_parts(r).await.unwrap());
+    }
+    let wall = started.elapsed();
+
+    // ---- per-request breakdown, with timeout headroom
+    eprintln!("\nseg  part  chars     bytes    audio     wall   budget  used    LUFS");
+    let mut worst_used = 0.0f64;
+    let mut chunk_join_spreads = Vec::new();
+    let mut all_parts: Vec<Pcm16k> = Vec::new();
+    for (r, parts) in reqs.iter().zip(&per_segment) {
+        let mut seg_lufs = Vec::new();
+        for (i, p) in parts.iter().enumerate() {
+            let l = lufs(&p.pcm, &format!("s{}p{i}", r.idx));
+            eprintln!(
+                "{:>3}  {:>4}  {:>5}  {:>8}  {:>6.1}s  {:>6.1}s {:>6.0}s  {:>4.0}%  {}",
+                r.idx,
+                i,
+                p.chars,
+                p.pcm.len(),
+                p.pcm.duration_secs_f64(),
+                p.wall.as_secs_f64(),
+                p.budget.as_secs_f64(),
+                p.budget_used() * 100.0,
+                l.map(|v| format!("{v:>6.1}"))
+                    .unwrap_or_else(|| "     ?".into())
+            );
+            worst_used = worst_used.max(p.budget_used());
+            if let Some(v) = l {
+                seg_lufs.push(v);
+            }
+            all_parts.push(p.pcm.clone());
+        }
+        // A chunk join only exists inside a segment that was split. Same voice on
+        // both sides, so any spread here is Azure's own request-to-request variation.
+        if seg_lufs.len() > 1 {
+            let spread = seg_lufs.iter().cloned().fold(f64::MIN, f64::max)
+                - seg_lufs.iter().cloned().fold(f64::MAX, f64::min);
+            eprintln!(
+                "     -> segment {} split into {} requests; chunk-join spread {spread:.1} LU",
+                r.idx,
+                parts.len()
+            );
+            chunk_join_spreads.push((r.idx, spread));
+        }
+    }
+
+    let requests: usize = per_segment.iter().map(|p| p.len()).sum();
+    let split_segments: Vec<u32> = reqs
+        .iter()
+        .zip(&per_segment)
+        .filter(|(_, p)| p.len() > 1)
+        .map(|(r, _)| r.idx)
+        .collect();
+
+    // ---- the joined chapter
+    let chapter = litrpg_tts::assemble(
+        &reqs
+            .iter()
+            .zip(&per_segment)
+            .map(|(_, parts)| {
+                Pcm16k::concat(&parts.iter().map(|p| p.pcm.clone()).collect::<Vec<_>>())
+            })
+            .collect::<Vec<_>>(),
+        litrpg_tts::DEFAULT_GAP_MS,
+    );
+
+    eprintln!(
+        "\n{requests} requests for {} segments (split: {split_segments:?})\n\
+         chapter: {} B = {:.1} s audio in {:.1} s sequential wall ({:.2}x realtime)\n\
+         worst timeout headroom: {:.0}% of budget used",
+        reqs.len(),
+        chapter.pcm.len(),
+        chapter.pcm.duration_secs_f64(),
+        wall.as_secs_f64(),
+        chapter.pcm.duration_secs_f64() / wall.as_secs_f64(),
+        worst_used * 100.0
+    );
+
+    // ---- cross-segment loudness (Azure path is NOT loudnorm'ed at all)
+    let seg_pcms: Vec<Pcm16k> = per_segment
+        .iter()
+        .map(|parts| Pcm16k::concat(&parts.iter().map(|p| p.pcm.clone()).collect::<Vec<_>>()))
+        .collect();
+    let seg_levels: Vec<f64> = seg_pcms
+        .iter()
+        .enumerate()
+        .filter_map(|(i, p)| lufs(p, &format!("seg{i}")))
+        .collect();
+    let seg_spread = seg_levels.iter().cloned().fold(f64::MIN, f64::max)
+        - seg_levels.iter().cloned().fold(f64::MAX, f64::min);
+    let whole = lufs(&chapter.pcm, "whole").unwrap();
+    eprintln!(
+        "cross-segment spread {seg_spread:.1} LU (two voices, un-normalized); \
+         whole chapter {whole:.1} LUFS"
+    );
+
+    // ================= assertions =================
+
+    // 1. No request came close to its own budget. This is the invariant that makes the
+    //    timeout a ceiling rather than a wait.
+    assert!(
+        worst_used < 0.5,
+        "a request used {:.0}% of its timeout budget — the ceiling is too tight",
+        worst_used * 100.0
+    );
+
+    // 2. The chapter actually exercised splitting.
+    assert!(
+        !split_segments.is_empty(),
+        "no segment was split; this fixture no longer tests chunking"
+    );
+    assert!(
+        requests > reqs.len(),
+        "expected more requests than segments"
+    );
+
+    // 3. Chunk joins must not step in level. Same voice on both sides, so anything
+    //    large here is Azure being inconsistent request to request — which would make
+    //    a mid-segment join audible in a way per-segment measurement never sees.
+    for (idx, spread) in &chunk_join_spreads {
+        assert!(
+            *spread < 2.0,
+            "segment {idx}: {spread:.1} LU across chunk joins — a mid-sentence-group \
+             level step would be audible"
+        );
+    }
+
+    // 4. Byte invariant on the joined result.
+    assert!(chapter.pcm.is_whole_ms());
+    assert_eq!(chapter.pcm.len() as u32, chapter.pcm.duration_ms() * 32);
+    assert_eq!(
+        chapter.pcm.len() as f64,
+        32_000.0 * (chapter.pcm.duration_ms() as f64 / 1000.0)
+    );
+
+    // 5. Manifest offsets byte-match their sources, across split segments.
+    assert_eq!(chapter.spans.len(), seg_pcms.len());
+    for (span, src) in chapter.spans.iter().zip(&seg_pcms) {
+        let slice = &chapter.pcm.as_bytes()[span.start_byte() as usize..span.end_byte() as usize];
+        assert_eq!(slice.len(), src.len(), "span length");
+        assert_eq!(slice, src.as_bytes(), "span content drifted");
+    }
+
+    // 6. A real chapter, and nothing silent.
+    assert!(chapter.pcm.duration_secs_f64() > 300.0);
+    for (i, p) in seg_pcms.iter().enumerate() {
+        assert!(peak(p) > 500, "segment {i} silent");
+    }
+}

@@ -626,6 +626,13 @@ fn a_chapter_whose_recorded_voice_was_substituted_is_reported_as_changing() {
         out.contains("will\n     change voice") || out.contains("change voice"),
         "{out}"
     );
+    // Positive on the claim itself, not only on the data and the absent phrases: a
+    // negative assertion can only pin the last mistake, never detect the next one. This
+    // fails if a rewrite drops or reverses the statement that the cast is authoritative.
+    assert!(
+        out.contains("re-derives voices from the cast"),
+        "must state that the cast is authoritative:\n{out}"
+    );
     assert!(out.contains("chapter 3 · narrator"), "{out}");
     assert!(
         out.contains("azure:en-GB-AdaMultilingualNeural -> sherpa:piper-en_GB-cori-high:0"),

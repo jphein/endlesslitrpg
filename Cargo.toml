@@ -1,6 +1,5 @@
 [workspace]
-# litrpg-store joins in Task 6; a member listed before it exists fails the build.
-members = ["crates/litrpg-core"]
+members = ["crates/litrpg-core", "crates/litrpg-store"]
 resolver = "3"
 
 [workspace.package]

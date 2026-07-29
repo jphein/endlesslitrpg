@@ -1,0 +1,84 @@
+//! SQLite persistence. The only crate in the workspace that writes state.
+
+pub mod migrations;
+
+use rusqlite::Connection;
+use thiserror::Error;
+
+use migrations::{MIGRATIONS, TARGET_VERSION};
+
+#[derive(Debug, Error)]
+pub enum StoreError {
+    #[error("sqlite: {0}")]
+    Sqlite(#[from] rusqlite::Error),
+    #[error("json: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("chapter {0} not found")]
+    ChapterNotFound(u32),
+    #[error("delta rejected: {0}")]
+    Rejected(String),
+}
+
+pub type Result<T> = core::result::Result<T, StoreError>;
+
+pub struct Store {
+    pub(crate) conn: Connection,
+}
+
+impl Store {
+    pub fn open(path: &std::path::Path) -> Result<Self> {
+        let conn = Connection::open(path)?;
+        let store = Self { conn };
+        store.configure(true)?;
+        store.migrate()?;
+        Ok(store)
+    }
+
+    pub fn open_in_memory() -> Result<Self> {
+        let conn = Connection::open_in_memory()?;
+        let store = Self { conn };
+        store.configure(false)?;
+        store.migrate()?;
+        Ok(store)
+    }
+
+    fn configure(&self, on_disk: bool) -> Result<()> {
+        self.conn.pragma_update(None, "foreign_keys", "ON")?;
+        if on_disk {
+            // WAL is invalid for :memory: databases.
+            self.conn.pragma_update(None, "journal_mode", "WAL")?;
+        }
+        Ok(())
+    }
+
+    pub fn schema_version(&self) -> Result<i64> {
+        Ok(self
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))?)
+    }
+
+    /// Apply any migrations the database has not yet seen. Idempotent.
+    pub fn migrate(&self) -> Result<()> {
+        let current = self.schema_version()?;
+        for (i, sql) in MIGRATIONS.iter().enumerate() {
+            let version = i as i64;
+            if version < current {
+                continue;
+            }
+            self.conn.execute_batch(sql)?;
+        }
+        if current < TARGET_VERSION {
+            self.conn
+                .pragma_update(None, "user_version", TARGET_VERSION)?;
+        }
+        Ok(())
+    }
+
+    pub fn table_names(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+        )?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+}

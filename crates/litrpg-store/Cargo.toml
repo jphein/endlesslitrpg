@@ -1,0 +1,13 @@
+[package]
+name = "litrpg-store"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "SQLite persistence for endless-litrpg: chapters, lore, and the append-only ledger"
+
+[dependencies]
+litrpg-core = { workspace = true }
+rusqlite = { workspace = true }
+thiserror = { workspace = true }
+serde_json = { version = "1.0.151", features = ["std"] }

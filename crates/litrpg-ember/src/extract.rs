@@ -67,6 +67,22 @@ pub const EXTRACTION_SCHEMA_NAME: &str = "chapter_extraction";
 /// Note this cannot be fixed by reordering (see above -- generation is alphabetical), so
 /// the description is the only lever there is.
 ///
+/// # The same asymmetry, one field to the right (2026-07-29, later)
+///
+/// Asking for gear worked on the first chapter extracted under it: the model proposed
+/// `equip:main_hand` for the protagonist, from "his own hand, resting on the hilt of his
+/// sword". It was then REJECTED as `MissingTextValue` -- it named the slot and sent no
+/// value.
+///
+/// `value_txt` said "For text fields. Only valid with op = set." Permitted, not required
+/// -- the identical failure shape as the field list, one property along. It now says the
+/// value is required, that a slot reported as occupied without saying by what is not a
+/// state change, and gives an example for each of `equip:` and `appear:`.
+///
+/// Worth noting the rejection was more informative than eight chapters of silence: a
+/// stored `applied = 0` row with a code says the model is reaching for the field and
+/// falling at the last step, where a zero count said only "no gear".
+///
 /// It happens to land favourably — `title` is alphabetically last, so it is written after
 /// the summary and the deltas — but that is luck, not design, and a field named `a_title`
 /// would be generated first.
@@ -95,7 +111,7 @@ pub const EXTRACTION_SCHEMA: &str = r#"{
           "field": {"type": "string", "description": "One of the legal fields. Numeric: hp, max_hp, level, xp, gold. Text: location, status. Carried: inv:<item name>. Worn or wielded, one of exactly these slots: equip:head, equip:chest, equip:legs, equip:feet, equip:hands, equip:cloak, equip:main_hand, equip:off_hand, equip:amulet, equip:ring1, equip:ring2. Physical description, one of exactly these traits: appear:hair, appear:eyes, appear:skin, appear:build, appear:height, appear:notable. Any other slot or trait name is rejected."},
           "op": {"type": "string", "enum": ["set", "add", "sub"]},
           "value_num": {"type": ["integer", "null"], "description": "For numeric fields. With add or sub this is the magnitude of the change, always positive."},
-          "value_txt": {"type": ["string", "null"], "description": "For text fields. Only valid with op = set."}
+          "value_txt": {"type": ["string", "null"], "description": "For text fields, and REQUIRED for them -- a text field with no value is refused, not recorded. Only valid with op = set. For `equip:<slot>` name the item as the chapter names it (\"a chipped ash-blade\", \"the quarry overseer's tunic\"); for `appear:<trait>` give the description (\"entirely grey\", \"a hand taller than most\"). Reporting a slot as occupied without saying by what is not a state change, and will be rejected."}
         }
       }
     },

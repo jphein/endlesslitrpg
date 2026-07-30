@@ -48,6 +48,25 @@ pub const EXTRACTION_SCHEMA_NAME: &str = "chapter_extraction";
 /// it: an earlier attempt to put `title` after `summary` for exactly that reason had no
 /// effect at all.
 ///
+/// # Permitted is not requested (2026-07-29)
+///
+/// `equip:` and `appear:` were legal for six chapters and the model never once used
+/// them. Neither did `gold` or `location`. What they had in common was being listed as
+/// allowed values rather than asked for: the `field` description was a flat enumeration
+/// ending `..., inv:<item>, equip:<slot>, appear:<trait>`, while `speakers` right below
+/// it carries a real instruction -- "Reporting who spoke is describing, not inventing" --
+/// and speakers came back every chapter.
+///
+/// So the fix is not a new field, it is asking. `deltas` now says to include what a
+/// character wears, carries and looks like, with the same describing-not-inventing
+/// framing that made `speakers` reliable, and `field` names the eleven slots and six
+/// traits explicitly instead of writing `<slot>`. The slots are whitelisted in
+/// `litrpg_core::validate` and anything else is rejected, so naming them costs nothing
+/// and removes the guess.
+///
+/// Note this cannot be fixed by reordering (see above -- generation is alphabetical), so
+/// the description is the only lever there is.
+///
 /// It happens to land favourably — `title` is alphabetically last, so it is written after
 /// the summary and the deltas — but that is luck, not design, and a field named `a_title`
 /// would be generated first.
@@ -66,14 +85,14 @@ pub const EXTRACTION_SCHEMA: &str = r#"{
     },
     "deltas": {
       "type": "array",
-      "description": "State changes the chapter explicitly states. Empty if nothing changed.",
+      "description": "State changes the chapter explicitly states. Empty if nothing changed. Include what a character WEARS OR CARRIES and how they LOOK, not only what happens to their numbers -- if the chapter puts a blade in someone's hand or describes their eyes, that is a state the chapter stated and belongs here. Recording it is describing, not inventing.",
       "items": {
         "type": "object",
         "additionalProperties": false,
         "required": ["subject", "field", "op"],
         "properties": {
           "subject": {"type": "string", "description": "Character name, spelled exactly as in the known-subjects list."},
-          "field": {"type": "string", "description": "One of the legal fields: hp, max_hp, level, xp, gold, location, status, inv:<item>, equip:<slot>, appear:<trait>."},
+          "field": {"type": "string", "description": "One of the legal fields. Numeric: hp, max_hp, level, xp, gold. Text: location, status. Carried: inv:<item name>. Worn or wielded, one of exactly these slots: equip:head, equip:chest, equip:legs, equip:feet, equip:hands, equip:cloak, equip:main_hand, equip:off_hand, equip:amulet, equip:ring1, equip:ring2. Physical description, one of exactly these traits: appear:hair, appear:eyes, appear:skin, appear:build, appear:height, appear:notable. Any other slot or trait name is rejected."},
           "op": {"type": "string", "enum": ["set", "add", "sub"]},
           "value_num": {"type": ["integer", "null"], "description": "For numeric fields. With add or sub this is the magnitude of the change, always positive."},
           "value_txt": {"type": ["string", "null"], "description": "For text fields. Only valid with op = set."}

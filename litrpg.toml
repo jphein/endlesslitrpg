@@ -24,7 +24,26 @@ bind_addr = "0.0.0.0:8093"
 
 # Chapters to keep rendered ahead of the playback cursor. Minimum 2 — with one,
 # the listener runs dry during the next chapter's render.
-buffer_target = 3
+#
+# Set to 6 on 2026-07-29, deliberately one above the five chapters then rendered.
+#
+# The buffer is what decides whether the engine writes at all: five rendered against a
+# target of 3 with the cursor at 0 meant `buffer_depth=5` and the engine idled
+# correctly and indefinitely. Raising the target is the honest lever for "write another
+# chapter now" — the alternative is advancing the playback cursor, which would put a
+# false number in the one field the throttle reads. "I want another chapter" and "I
+# finished chapter 3" are different claims and only one of them is true.
+#
+# `target = rendered + 1` is the precise form: the engine writes exactly one chapter and
+# then idles again, rather than running away. Note the comparison is `depth < target`,
+# so setting it *equal* to the rendered count does nothing — a target of 5 against
+# `depth=5` stays idle.
+# Raised 6 -> 7 (2026-07-29) to make the engine render ONE more chapter, so the
+# strengthened extractor prompt (51f2af7) actually runs. `equip:`/`appear:` had been legal
+# for six chapters and produced zero rows, so the prompt fix is unverified until a chapter
+# is extracted under it. Same `rendered + 1` discipline as the note above: exactly one
+# chapter, then idle again.
+buffer_target = 7
 
 # ~2000 words is about 13 minutes of narration at a natural pace.
 target_words = 2000

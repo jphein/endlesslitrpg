@@ -88,6 +88,10 @@ pub enum BufferCursor {
 
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
+    /// Seed only, **not** the effective target. Since schema 008 the live value is the
+    /// newest `buffer_target_changes` row, read every cycle by
+    /// [`Engine::resolve_buffer_target`]; this is what stands in until one exists. Read it
+    /// directly and you reintroduce the startup snapshot this table was added to remove.
     pub buffer_target: u32,
     pub target_words: u32,
     pub narrator_voice: String,
@@ -340,6 +344,24 @@ where
         }
     }
 
+    /// The buffer target in force for this cycle.
+    ///
+    /// Read from the store every cycle, exactly like [`Self::resolve_cursor`] — and for the same
+    /// reason. Both halves of `buffer_depth < buffer_target` must be current or the comparison
+    /// describes two different instants. Config is the seed a fresh install starts from: when no
+    /// change has ever been recorded, `buffer_target_changes` is empty and the configured value
+    /// stands.
+    ///
+    /// This is what makes a target set through the daemon take effect within one poll interval
+    /// instead of requiring a restart — and a restart is not a safe mechanism here, because it
+    /// re-runs the Ember preflight and `RestartPreventExitStatus=2` makes a failed preflight
+    /// permanent.
+    fn resolve_buffer_target(&self) -> Result<u32, EngineError> {
+        Ok(self
+            .with_store(|s| s.buffer_target())?
+            .unwrap_or(self.config.buffer_target))
+    }
+
     /// One turn of the loop.
     ///
     /// `cursor` fixes where the rendered-ahead buffer measures from; see [`BufferCursor`].
@@ -408,12 +430,9 @@ where
 
         // ---- 1. Buffer check ------------------------------------------------
         let buffer_depth = self.with_store(|s| buffer_depth(s, consumed_through))?;
-        if buffer_depth >= self.config.buffer_target {
-            debug!(
-                buffer_depth,
-                target = self.config.buffer_target,
-                "buffer full; idling"
-            );
+        let buffer_target = self.resolve_buffer_target()?;
+        if buffer_depth >= buffer_target {
+            debug!(buffer_depth, target = buffer_target, "buffer full; idling");
             return Ok(CycleOutcome::Idle { buffer_depth });
         }
 

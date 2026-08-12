@@ -4,6 +4,7 @@
 //! reaches this daemon at a literal `10.0.6.107:8093`.
 
 pub mod access_log;
+pub mod buffer;
 pub mod chapters;
 pub mod config;
 pub mod datetime;
@@ -133,6 +134,15 @@ pub fn router(state: Arc<AppState>) -> Router {
             get(progress::get_progress)
                 .put(progress::put_progress)
                 .layer(DefaultBodyLimit::max(progress::MAX_PROGRESS_BODY_BYTES)),
+        )
+        // The buffer target. Deliberately its own route rather than a field on
+        // `/api/progress`: that endpoint owns `consumed_through`, and putting the two
+        // knobs behind one URL is how a caller ends up moving the cursor when it meant to
+        // ask for another chapter. Separate routes make the wrong lever unreachable by
+        // accident rather than merely discouraged.
+        .route(
+            "/api/buffer",
+            post(buffer::post_buffer).layer(DefaultBodyLimit::max(buffer::MAX_BUFFER_BODY_BYTES)),
         )
         // One handler for both extensions; it parses `NNNN.pcm` / `NNNN.mp3` itself,
         // which is also where path traversal is rejected (see `media::parse_media_name`).

@@ -471,8 +471,17 @@ Stated explicitly so implementation has nothing to guess:
 | `notes.source` | `cli` \| `watch` \| `candela` \| `voice` |
 | `chapters.state_dirty` | `0` normally; `1` when pass 2 failed and deltas were never extracted |
 
-Buffer target is **3** rendered-ahead chapters (minimum 2), and `max_hp` is itself a ledger field, so
-the clamp in §6.2 reads the folded snapshot rather than a constant.
+Buffer target seeds at **3** rendered-ahead chapters (minimum 2), and `max_hp` is itself a ledger
+field, so the clamp in §6.2 reads the folded snapshot rather than a constant.
+
+**Amended (schema 008).** The buffer target is store state, not config state. `litrpg.toml` seeds it;
+the newest `buffer_target_changes` row overrides it, and both the engine (every cycle) and the daemon
+(every `/api/progress`) read that row. Before this it was read once per process at startup, so the two
+held independent snapshots and a change reached the engine only via a restart — while `/api/progress`
+would already report the new number. `POST /api/buffer` is the write seam; it takes a relative `bump`
+(resolved server-side, for callers that cannot do arithmetic — a spoken command) or an absolute
+`target`, and requires a `source`, recording a `justification` alongside it. It never touches
+`consumed_through`: that is the dishonest lever, and it lives behind a different route on purpose.
 
 ### 6.1 There is no `characters.hp` column
 

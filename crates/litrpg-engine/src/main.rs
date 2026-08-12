@@ -184,7 +184,10 @@ async fn run(args: Args) -> Result<ExitCode, Box<dyn std::error::Error>> {
         db = %config.db_path.display(),
         media = %config.media_dir.display(),
         ember = %config.ember_url,
-        buffer_target = config.buffer_target,
+        // Named `_seed` because since schema 008 it is exactly that: the fallback used
+        // until someone records a target. Logging it as `buffer_target` would print a
+        // number the engine may not be using the moment a change row exists.
+        buffer_target_seed = config.buffer_target,
         "configuration loaded"
     );
 

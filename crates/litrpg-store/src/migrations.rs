@@ -44,6 +44,10 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "007_subject_alias",
         sql: include_str!("schema/007_subject_alias.sql"),
     },
+    Migration {
+        name: "008_buffer_target",
+        sql: include_str!("schema/008_buffer_target.sql"),
+    },
 ];
 
 pub const TARGET_VERSION: i64 = MIGRATIONS.len() as i64;

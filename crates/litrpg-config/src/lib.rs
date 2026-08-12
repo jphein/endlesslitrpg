@@ -140,6 +140,21 @@ pub struct Config {
     pub ember_model: String,
     #[serde(default = "default_bind_addr")]
     pub bind_addr: String,
+    /// Rendered-ahead chapters to keep — the **seed**, not the live value.
+    ///
+    /// Since schema 008 the effective target is the newest `buffer_target_changes` row,
+    /// read from the store on every engine cycle and on every `/api/progress` request.
+    /// This value stands only until something records one, so it still decides what a
+    /// fresh install does and still gates `validate()`.
+    ///
+    /// **The justification trail moved with it.** Raising the target used to mean editing
+    /// this file and writing the reason in a comment above it (6 → 7 → 8 → 9, each with a
+    /// documented rationale). That discipline is intact but now lives in the database:
+    /// `POST /api/buffer` requires a `source` and records a `justification`, so the trail
+    /// is queryable, records *who* asked, and survives a `git checkout` — none of which a
+    /// comment could do. Editing this number by hand still works and is still honest for
+    /// a fresh deployment; for a running one it changes nothing until the engine restarts,
+    /// and the endpoint is the lever that does not require one.
     #[serde(default = "default_buffer_target")]
     pub buffer_target: u32,
     #[serde(default = "default_target_words")]
@@ -405,6 +420,11 @@ bind_addr = "0.0.0.0:8093"
 
 # Rendered-ahead chapters to keep. Minimum 2: with one, the watch runs dry
 # while the next chapter renders (spec §6.0).
+#
+# This is the SEED. Once a target is recorded through `POST /api/buffer` the
+# stored value wins, and it is what the engine reads every cycle — so raising
+# this line changes a running deployment only after a restart. The endpoint
+# carries the justification that used to live in a comment here.
 buffer_target = 3
 
 # Target chapter length. ~2000 words is roughly 13 minutes of narration.

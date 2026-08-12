@@ -174,6 +174,101 @@ async fn the_cycle_idles_once_the_buffer_is_full() {
     );
 }
 
+/// The change this table exists for: a target recorded while the engine is running is
+/// picked up on the **next cycle**, with no restart.
+///
+/// Restart was the old mechanism and it is not a safe one — it re-runs the Ember preflight,
+/// and `RestartPreventExitStatus=2` makes a preflight failure permanent. An engine that
+/// only notices a new target by dying and coming back is an engine a spoken command can
+/// kill.
+#[tokio::test]
+async fn a_recorded_target_is_picked_up_without_a_restart() {
+    let e = engine(
+        FakeGenerator::new(),
+        FakeRenderer::new(),
+        FakeLibrary::new(),
+        FakeArtifacts::new(),
+    );
+
+    // Fill to the configured target of 3, then confirm it really has stopped.
+    for _ in 0..3 {
+        e.run_cycle(BufferCursor::At(0)).await.unwrap();
+    }
+    assert!(
+        matches!(
+            e.run_cycle(BufferCursor::At(0)).await.unwrap(),
+            CycleOutcome::Idle { .. }
+        ),
+        "precondition: the engine must be idle at the configured target"
+    );
+
+    // Someone casts "ember, continue" — the daemon writes a row. Nothing is restarted, and
+    // the same `Engine` value keeps running.
+    e.store_handle()
+        .lock()
+        .unwrap()
+        .record_buffer_target(4, "voice", "cast ember continue")
+        .unwrap();
+
+    assert!(
+        e.run_cycle(BufferCursor::At(0))
+            .await
+            .unwrap()
+            .produced_chapter()
+            .is_some(),
+        "a target recorded mid-run must take effect on the very next cycle"
+    );
+}
+
+/// Lowering works too, and immediately. Asserted because a one-way ratchet would be a
+/// perfectly plausible bug that the raise-only test above could never catch.
+#[tokio::test]
+async fn lowering_the_recorded_target_idles_a_producing_engine() {
+    let e = engine(
+        FakeGenerator::new(),
+        FakeRenderer::new(),
+        FakeLibrary::new(),
+        FakeArtifacts::new(),
+    );
+
+    e.run_cycle(BufferCursor::At(0)).await.unwrap();
+    e.store_handle()
+        .lock()
+        .unwrap()
+        .record_buffer_target(1, "cli", "enough for now")
+        .unwrap();
+
+    match e.run_cycle(BufferCursor::At(0)).await.unwrap() {
+        CycleOutcome::Idle { buffer_depth } => assert_eq!(buffer_depth, 1),
+        other => panic!("expected Idle once the target dropped below the depth, got {other:?}"),
+    }
+}
+
+/// With no rows, config still rules — so an existing deployment behaves exactly as it did
+/// before the migration, and `litrpg.toml` remains a working seed.
+#[tokio::test]
+async fn an_empty_change_table_falls_back_to_the_configured_seed() {
+    let e = engine(
+        FakeGenerator::new(),
+        FakeRenderer::new(),
+        FakeLibrary::new(),
+        FakeArtifacts::new(),
+    );
+    assert_eq!(
+        e.store_handle().lock().unwrap().buffer_target().unwrap(),
+        None,
+        "precondition: nothing recorded"
+    );
+
+    for _ in 0..3 {
+        e.run_cycle(BufferCursor::At(0)).await.unwrap();
+    }
+    match e.run_cycle(BufferCursor::At(0)).await.unwrap() {
+        CycleOutcome::Idle { buffer_depth } => assert_eq!(buffer_depth, 3, "the configured 3"),
+        other => panic!("expected Idle at the configured seed, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn a_consumed_chapter_frees_buffer_space() {
     let e = engine(

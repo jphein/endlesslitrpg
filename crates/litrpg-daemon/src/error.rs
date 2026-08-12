@@ -17,6 +17,14 @@ pub enum ApiError {
     #[error("bad request: {0}")]
     BadRequest(String),
 
+    /// Syntactically fine and semantically impossible — a bump of zero, a target past the
+    /// ceiling, both `bump` and `target` at once. Split from [`Self::BadRequest`] so a
+    /// caller can tell "I sent the wrong shape" from "I asked for something that cannot
+    /// be", which for a *spoken* command is the difference between a bug in the spell and
+    /// a limit the speaker just hit.
+    #[error("unprocessable: {0}")]
+    Unprocessable(String),
+
     /// The request is well-formed but the server's state cannot satisfy it — e.g.
     /// recording playback progress before `litrpg init` has written a story row.
     #[error("conflict: {0}")]
@@ -39,6 +47,7 @@ impl IntoResponse for ApiError {
         let status = match &self {
             Self::ChapterNotFound(_) | Self::AudioNotFound(_) => StatusCode::NOT_FOUND,
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
+            Self::Unprocessable(_) => StatusCode::UNPROCESSABLE_ENTITY,
             Self::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
             Self::Conflict(_) => StatusCode::CONFLICT,
             // A missing chapter surfaces from the store as `ChapterNotFound`; map it

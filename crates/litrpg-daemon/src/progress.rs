@@ -40,7 +40,13 @@ pub struct ProgressResponse {
     pub chapters_ahead: u32,
     /// Chapters above the cursor that have rendered audio — what "3 ready" means.
     pub ready_ahead: u32,
-    /// The engine's target for `ready_ahead` (`litrpg-config`'s `buffer_target`).
+    /// The engine's target for `ready_ahead` — the **live** value, read from the store on
+    /// every request, not the daemon's startup copy of `litrpg-config`.
+    ///
+    /// It was the config snapshot until schema 008, which meant this field could report a
+    /// target the engine was not using: the two processes each read `litrpg.toml` once, at
+    /// their own startup, and nothing reconciled them afterwards. Reading it here is what
+    /// makes `buffer_healthy` a statement about the engine rather than about this process.
     pub buffer_target: u32,
     /// `ready_ahead >= buffer_target`.
     pub buffer_healthy: bool,
@@ -66,6 +72,11 @@ async fn snapshot(state: &Arc<AppState>) -> ApiResult<ProgressResponse> {
     let consumed_through = store.consumed_through()?;
     let latest_chapter = store.latest_number()?;
     let initialised = store.story()?.is_some();
+    // Same fallback the engine applies, so the two processes cannot disagree about what
+    // "no recorded target" means. Taken under the same lock as everything else here.
+    let buffer_target = store
+        .buffer_target()?
+        .unwrap_or(state.config.buffer_target);
     // One query, then count in memory: the two "ahead" figures come from the same row
     // set, so fetching once means they cannot describe different instants.
     let ahead = store.chapters_since(consumed_through)?;
@@ -87,8 +98,8 @@ async fn snapshot(state: &Arc<AppState>) -> ApiResult<ProgressResponse> {
         latest_chapter,
         chapters_ahead,
         ready_ahead,
-        buffer_target: state.config.buffer_target,
-        buffer_healthy: ready_ahead >= state.config.buffer_target,
+        buffer_target,
+        buffer_healthy: ready_ahead >= buffer_target,
         // `chapters_since` is ordered by number, so the first row is the next chapter.
         next_chapter: ahead.first().map(|c| c.number),
         next_playable,

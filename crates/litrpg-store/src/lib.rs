@@ -1,6 +1,7 @@
 //! SQLite persistence. The only crate in the workspace that writes state.
 
 pub mod alias;
+pub mod buffer;
 pub mod chapters;
 pub mod heartbeat;
 pub mod ledger;
@@ -9,6 +10,7 @@ pub mod migrations;
 pub mod story;
 
 pub use alias::Alias;
+pub use buffer::BufferTargetChange;
 pub use chapters::{ChapterRow, NewChapter};
 pub use heartbeat::EngineHeartbeat;
 pub use ledger::{CastRow, NoteRow, REWOUND_REASON};

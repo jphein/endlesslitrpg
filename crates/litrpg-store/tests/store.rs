@@ -15,6 +15,10 @@ fn all_expected_tables_exist() {
     assert_eq!(
         tables,
         vec![
+            // Added by migration 008: the buffer target, and the reason it changed. A row
+            // rather than a config value, so the engine and the daemon read one live
+            // number instead of two startup snapshots that could disagree.
+            "buffer_target_changes",
             "cast",
             "chapters",
             "engine_heartbeat",

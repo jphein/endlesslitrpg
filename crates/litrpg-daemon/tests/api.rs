@@ -560,6 +560,25 @@ async fn valid_note_is_created() {
     assert_eq!(v["source"], "watch");
 }
 
+/// A spoken director note must be accepted and must stay distinguishable from a typed
+/// one. Pinned separately from the whitelist-driven test above, which iterates whatever
+/// `NOTE_SOURCES` happens to contain and so would still pass if `voice` were dropped.
+#[tokio::test]
+async fn voice_is_an_accepted_note_source() {
+    let f = fixture();
+    let resp = f
+        .post_json(
+            "/api/notes",
+            serde_json::json!({"body": "introduce a rival", "source": "voice"}),
+        )
+        .await;
+    assert_status(&resp, StatusCode::CREATED);
+    let v = body_json(resp).await;
+    // Echoed back unchanged: a dictated note must not be silently relabelled `cli`,
+    // or the notes table loses the one field that says a microphone was involved.
+    assert_eq!(v["source"], "voice");
+}
+
 /// Each accepted source must work, and ids must advance — proof the rows really land
 /// rather than the handler returning a constant.
 #[tokio::test]
@@ -567,7 +586,10 @@ async fn notes_persist_across_sources_with_distinct_ids() {
     let f = fixture();
     let mut ids = Vec::new();
 
-    for source in ["cli", "watch", "candela"] {
+    // Driven by the whitelist itself rather than a copy of it: a source added to
+    // NOTE_SOURCES but not to this list would otherwise ship untested, which is how
+    // `voice` came to be missing here in the first place.
+    for source in litrpg_daemon::notes::NOTE_SOURCES {
         let resp = f
             .post_json(
                 "/api/notes",
@@ -578,7 +600,13 @@ async fn notes_persist_across_sources_with_distinct_ids() {
         ids.push(body_json(resp).await["id"].as_i64().unwrap());
     }
 
-    assert_eq!(ids.len(), 3);
+    // Not `ids.len() == NOTE_SOURCES.len()` — iterating the whitelist makes that
+    // tautological, and an assertion that cannot fail provides cover it has not earned.
+    // The load-bearing checks are the per-source `CREATED` above and these two.
+    assert!(
+        !ids.is_empty(),
+        "the whitelist must not be empty, or this test passes vacuously"
+    );
     assert!(
         ids.windows(2).all(|w| w[1] > w[0]),
         "note ids must be distinct and increasing, got {ids:?}"

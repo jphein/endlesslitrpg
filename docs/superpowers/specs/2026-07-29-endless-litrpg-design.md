@@ -468,7 +468,7 @@ Stated explicitly so implementation has nothing to guess:
 | `cast.kind` | `narrator` \| `character` \| `system` |
 | `lore.kind` | `character` \| `place` \| `item` \| `faction` \| `rule` |
 | `summaries.level` | `0` chapter · `1` arc · `2` book |
-| `notes.source` | `cli` \| `watch` \| `candela` |
+| `notes.source` | `cli` \| `watch` \| `candela` \| `voice` |
 | `chapters.state_dirty` | `0` normally; `1` when pass 2 failed and deltas were never extracted |
 
 Buffer target is **3** rendered-ahead chapters (minimum 2), and `max_hp` is itself a ledger field, so
@@ -520,7 +520,8 @@ carry facts without carrying cadence.
 ### 6.4 Director notes
 
 `notes` rows are consumed at chapter boundaries and stamped with `consumed_chapter`. Sources: `cli`,
-`watch` (push-to-talk → STT), `candela`. The engine never waits for one.
+`watch` (push-to-talk → STT), `candela`, `voice` (a spoken incantation on the desktop, via
+gnome-speaks' spellbook). The engine never waits for one.
 
 This is also where interactivity would attach later if D2 is ever revisited — a choice is a note with
 a stronger contract. No branch machinery is built now.

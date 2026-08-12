@@ -6,7 +6,7 @@ use serde::Serialize;
 use crate::{CliError, Result};
 
 /// `notes.source` for anything queued from this CLI (§6.0 allows
-/// `cli` | `watch` | `candela`).
+/// `cli` | `watch` | `candela` | `voice`).
 pub const SOURCE_CLI: &str = "cli";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

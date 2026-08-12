@@ -1,5 +1,5 @@
-//! `POST /api/notes` — director notes from the CLI, the watch's push-to-talk, or
-//! Candela.
+//! `POST /api/notes` — director notes from the CLI, the watch's push-to-talk,
+//! Candela, or a spoken incantation.
 //!
 //! Previously a documented `501`: the `notes` table existed in the schema but
 //! `litrpg-store` exposed no way to write it. `Store::insert_note` now exists, so the
@@ -17,7 +17,12 @@ use crate::AppState;
 use crate::error::{ApiError, ApiResult};
 
 /// Whitelisted note origins (per the route contract).
-pub const NOTE_SOURCES: &[&str] = &["cli", "watch", "candela"];
+///
+/// `voice` is a spoken director note (gnome-speaks' spellbook → `POST /api/notes`).
+/// It is deliberately distinct from `cli`: a dictated note carries STT transcription
+/// risk that a typed one does not, so "the model was told something odd" and "the
+/// microphone heard something odd" stay separable when reading the notes table back.
+pub const NOTE_SOURCES: &[&str] = &["cli", "watch", "candela", "voice"];
 
 /// Longest accepted note body. A director note is an instruction, not prose, and the
 /// watch's push-to-talk transcript is short — an unbounded field reachable from an

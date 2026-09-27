@@ -97,3 +97,7 @@ because sherpa-onnx calls `exit()` on a missing asset rather than returning an e
   what was measured rather than assumed
 - `docs/superpowers/plans/` — implementation plans
 - `docs/samples/` — a chapter generated early on, kept as a sample
+
+## License
+
+AGPL-3.0-or-later © 2026 Jeffrey Pine Hein. See [LICENSE](LICENSE).

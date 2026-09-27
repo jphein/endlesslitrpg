@@ -13,7 +13,7 @@ resolver = "3"
 
 [workspace.package]
 edition = "2024"
-license = "MIT OR Apache-2.0"
+license = "AGPL-3.0-or-later"
 rust-version = "1.97"
 
 # Central version pins. Crates reference these with `{ workspace = true }` so no
